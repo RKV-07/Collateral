@@ -23,7 +23,7 @@ Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes 
 
 `ReasoningAgentNode` tries providers in order, falling through on failure:
 
-1. **Gemini** (`gemini-2.5-flash`) — primary
+1. **Gemini** (`gemini-2.5-flash`) — primary (thinking disabled via `thinking_budget=0`)
 2. **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) — fallback 1
 3. **Poolside** (`poolside/laguna-s-2.1` at `inference.poolside.ai`) — fallback 2 (thinking disabled for clean structured output)
 4. **Deterministic** — no LLM needed; computes a safe fallback recommendation
