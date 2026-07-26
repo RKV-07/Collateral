@@ -95,6 +95,10 @@ def main():
             assert gain_lot["wash_sale_caution"] is False, "ERROR: gain lot should not have wash_sale_caution"
             print("  ✓ VERIFIED: Wash-sale caution correctly flagged for same-symbol lot within 30 days!")
 
+        if user_acc["account_id"] == "f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f809142":
+            assert abs(headroom - (-2200.0)) < 1e-5, f"ERROR: Expected headroom -2200.0, got {headroom}"
+            print("  ✓ VERIFIED: Fixture 6 (Non-Standard Limit 35%) produced headroom == -2200.0 exactly!")
+
         assert result is None, f"ERROR: ExecutionNode executed before human approval! Result: {result}"
         print("  ✓ VERIFIED: Graph paused before ExecutionNode as required.\n")
 

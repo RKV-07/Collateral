@@ -13,17 +13,17 @@ logger = logging.getLogger(__name__)
 class Lot(BaseModel):
     lot_id: UUID = Field(default_factory=uuid4)
     symbol: str
-    quantity: float
-    cost_basis: float
-    current_price: float
+    quantity: float = Field(gt=0)
+    cost_basis: float = Field(ge=0)
+    current_price: float = Field(ge=0)
     acquired_date: str
 
 class Account(BaseModel):
     account_id: UUID = Field(default_factory=uuid4)
     name: str
-    loan_balance: float
-    max_ltv_limit: float = 0.50
-    cash: float = 0.0
+    loan_balance: float = Field(ge=0)
+    max_ltv_limit: float = Field(gt=0, le=1, default=0.50)
+    cash: float = Field(ge=0, default=0.0)
     holdings: List[Lot]
 
 class LotProposal(BaseModel):
@@ -36,6 +36,7 @@ class Recommendation(BaseModel):
     risk_state: str
     recommended_action: str
     proposed_lots: List[LotProposal]
+    resulting_ltv_if_executed: Optional[float] = None
     rationale: str
 
 # Shared State Definition
@@ -210,6 +211,7 @@ Hard rules:
 6. rationale must be 2-4 plain-English sentences, no jargon without a one-line explanation, and must explicitly note that this is not licensed financial or tax advice.
 7. Output must strictly conform to the Recommendation schema you were bound with — no extra fields, no prose outside the schema.
 8. If asked to explain resulting LTV after a hypothetical sale, do not compute new LTV values yourself — collateral value decreases by the amount sold (shrinking-collateral feedback loop), which is easy to get wrong. Only speak in terms of the given risk_state/headroom, or explicitly state that a precise pro-forma figure requires re-running the optimizer.
+9. When only one lot of a symbol currently exists, still note that a wash-sale risk could arise if the user repurchases the same or a substantially identical security within 30 days after this sale — that risk cannot be evaluated from current data alone.
 """
 
 
@@ -226,16 +228,17 @@ class ReasoningAgentNode:
         self.structured_llm = None
         self.fallback_llm = None
         self.fallback_structured_llm = None
+        self.poolside_llm = None
+        self.poolside_structured_llm = None
 
-        try:
-            from langchain.chat_models import init_chat_model
-            # Synchronize GOOGLE_API_KEY environment variable
-            if "GEMINI_API_KEY" in os.environ and "GOOGLE_API_KEY" not in os.environ:
-                os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+        from langchain.chat_models import init_chat_model
 
-            # Primary: Gemini
-            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-            if api_key:
+        # Primary: Gemini
+        if "GEMINI_API_KEY" in os.environ and "GOOGLE_API_KEY" not in os.environ:
+            os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            try:
                 self.llm = init_chat_model(
                     self.model_name,
                     model_provider="google_genai",
@@ -243,15 +246,18 @@ class ReasoningAgentNode:
                     max_retries=2,
                     max_tokens=2048,
                 )
-                self.structured_llm = self.llm.with_structured_output(Recommendation)
-            else:
-                logger.warning("[ReasoningAgentNode] No GOOGLE_API_KEY/GEMINI_API_KEY found")
+                self.structured_llm = self.llm.with_structured_output(
+                    Recommendation, method="function_calling"
+                )
+            except Exception as e:
+                logger.error("[ReasoningAgentNode] Gemini init failed: %s", str(e))
 
-            # Fallback: OpenRouter (Gemma 4 26B — free tier, native structured output)
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-            if openrouter_key:
+        # Fallback 1: OpenRouter
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if openrouter_key:
+            try:
                 self.fallback_llm = init_chat_model(
-                    "google/gemma-4-26b-a4b-it:free",
+                    "google/gemma-4-26b-a4b-it:free",  # slug verified against openrouter.ai on 2026-07-26
                     model_provider="openai",
                     temperature=self.temperature,
                     base_url="https://openrouter.ai/api/v1",
@@ -259,25 +265,40 @@ class ReasoningAgentNode:
                     max_retries=2,
                     max_tokens=2048,
                 )
-                self.fallback_structured_llm = self.fallback_llm.with_structured_output(Recommendation)
-                if not self.structured_llm:
-                    # No primary — use OpenRouter as main
-                    self.llm = self.fallback_llm
-                    self.structured_llm = self.fallback_structured_llm
-                    self.fallback_llm = None
-                    self.fallback_structured_llm = None
-            else:
-                logger.warning("[ReasoningAgentNode] No OPENROUTER_API_KEY found — no fallback available")
+                self.fallback_structured_llm = self.fallback_llm.with_structured_output(
+                    Recommendation, method="function_calling"
+                )
+            except Exception as e:
+                logger.error("[ReasoningAgentNode] OpenRouter init failed: %s", str(e))
 
-        except Exception as e:
-            logger.error("[ReasoningAgentNode] LLM init failed: %r", e)
-            self.llm = None
-            self.structured_llm = None
+        # Fallback 2: Poolside
+        poolside_key = os.environ.get("POOLSIDE_API_KEY")
+        if poolside_key:
+            try:
+                self.poolside_llm = init_chat_model(
+                    "poolside/laguna-s-2.1",
+                    model_provider="openai",
+                    temperature=self.temperature,
+                    base_url="https://inference.poolside.ai/v1",
+                    api_key=poolside_key,
+                    max_retries=2,
+                    max_tokens=2048,
+                    extra_body={"thinking": False},
+                )
+                self.poolside_structured_llm = self.poolside_llm.with_structured_output(
+                    Recommendation, method="function_calling"
+                )
+            except Exception as e:
+                logger.error("[ReasoningAgentNode] Poolside init failed: %s", str(e))
+
+        if not any([self.structured_llm, self.fallback_structured_llm, self.poolside_structured_llm]):
+            logger.warning("[ReasoningAgentNode] No LLM providers initialized — will use deterministic fallback only")
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         risk_state = state.get("risk_state", "Safe")
         headroom = state.get("headroom", 0.0)
         ranked_lots = state.get("ranked_lots", [])
+        valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
 
         user_data = (
             f"risk_state: {risk_state}\n"
@@ -285,54 +306,41 @@ class ReasoningAgentNode:
             f"ranked_lots (losses first, wash_sale_caution precomputed):\n"
             f"{json.dumps(ranked_lots, indent=2, default=str)}"
         )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_data},
+        ]
 
-        recommendation: Optional[Recommendation] = None
+        recommendation = None
 
-        # Try primary LLM (Gemini)
-        if self.structured_llm is not None:
+        for label, structured_llm in [
+            ("Gemini", self.structured_llm),
+            ("OpenRouter", self.fallback_structured_llm),
+            ("Poolside", self.poolside_structured_llm),
+        ]:
+            if recommendation is not None or structured_llm is None:
+                continue
             try:
-                result = self.structured_llm.invoke([
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_data},
-                ])
-                if isinstance(result, Recommendation):
-                    recommendation = result
+                result = structured_llm.invoke(messages)
+                if not isinstance(result, Recommendation):
+                    continue
+                hallucinated = [p for p in result.proposed_lots if str(p.lot_id) not in valid_lot_ids]
+                if hallucinated:
+                    logger.error("[ReasoningAgentNode] %s returned unknown lot_id(s) — discarding", label)
+                    continue
+                recommendation = result
+                logger.info("[ReasoningAgentNode] %s produced valid recommendation", label)
             except Exception as e:
-                logger.warning("[ReasoningAgentNode] Primary LLM invoke failed: %r — trying fallback", e)
-
-        # Try fallback LLM (OpenRouter)
-        if recommendation is None and self.fallback_structured_llm is not None:
-            try:
-                result = self.fallback_structured_llm.invoke([
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_data},
-                ])
-                if isinstance(result, Recommendation):
-                    recommendation = result
-                    logger.info("[ReasoningAgentNode] Fallback LLM (OpenRouter) succeeded")
-            except Exception as e:
-                logger.error("[ReasoningAgentNode] Fallback LLM invoke failed: %r", e)
-
-        # Validate LLM didn't hallucinate lot_ids
-        if recommendation is not None:
-            valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
-            hallucinated = [
-                p for p in recommendation.proposed_lots
-                if str(p.lot_id) not in valid_lot_ids
-            ]
-            if hallucinated:
-                logger.error(
-                    "[ReasoningAgentNode] LLM returned %d hallucinated lot_id(s) — discarding LLM output",
-                    len(hallucinated)
-                )
-                recommendation = None
+                logger.warning("[ReasoningAgentNode] %s invoke failed: %s", label, str(e))
 
         # Fallback structured calculation if LLM call is unavailable or fails
         if recommendation is None:
             proposed = []
             if headroom < 0:
+                account_obj = state.get("account")
+                max_ltv_limit = account_obj.max_ltv_limit if isinstance(account_obj, Account) else float(account_obj.get("max_ltv_limit", 0.50)) if isinstance(account_obj, dict) else 0.50
                 deficit = abs(headroom)
-                needed_proceeds = deficit / 0.50
+                needed_proceeds = deficit / (1 - max_ltv_limit)
                 accumulated = 0.0
                 for lot in ranked_lots:
                     if accumulated >= needed_proceeds:
@@ -350,12 +358,23 @@ class ReasoningAgentNode:
                     )
                     accumulated += sell_qty * lot["current_price"]
 
+                # Compute resulting LTV after proposed sales (accounts for shrinking collateral)
+                lot_price_map = {str(lot["lot_id"]): lot["current_price"] for lot in ranked_lots}
+                total_proceeds = sum(p.quantity * lot_price_map.get(str(p.lot_id), 0) for p in proposed)
+                collateral_after = sum(lot["quantity"] * lot["current_price"] for lot in ranked_lots) - total_proceeds
+                loan_after = (account_obj.loan_balance if isinstance(account_obj, Account) else float(account_obj.get("loan_balance", 0))) - total_proceeds
+                cash_after = (account_obj.cash if isinstance(account_obj, Account) else float(account_obj.get("cash", 0))) + total_proceeds
+                net_debt_after = loan_after - cash_after
+                resulting_ltv = (net_debt_after / collateral_after) if collateral_after > 0 else 0.0
+
                 rec_action = "Liquidate tax-loss holdings to restore borrowing headroom."
                 rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling losses first to maximize tax harvesting."
             elif risk_state == "Warning":
+                resulting_ltv = None
                 rec_action = "Monitor portfolio leverage. Optional minor deleveraging."
                 rationale = f"Headroom is low (${headroom:.2f}). No immediate liquidation enforced."
             else:
+                resulting_ltv = None
                 rec_action = "Maintain current positions."
                 rationale = f"Portfolio is Safe with ${headroom:.2f} in headroom."
 
@@ -363,6 +382,7 @@ class ReasoningAgentNode:
                 risk_state=risk_state,
                 recommended_action=rec_action,
                 proposed_lots=proposed,
+                resulting_ltv_if_executed=resulting_ltv,
                 rationale=rationale
             )
 

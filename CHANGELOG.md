@@ -1,0 +1,62 @@
+# Changelog
+
+## [Unreleased]
+
+### Added
+- **Poolside API fallback** (`nodes.py`): Third LLM provider via `POOLSIDE_API_KEY`, uses `poolside/laguna-s-2.1` at `inference.poolside.ai`. Chains Gemini → OpenRouter → Poolside → deterministic fallback.
+- **System/user prompt split** (`nodes.py`): `SYSTEM_PROMPT` constant with 9 hard rules, sent as separate system message via `.invoke([system, user])` for better structured-output adherence.
+- **Hallucinated lot_id guard** (`nodes.py`): Validates LLM-proposed `lot_id`s against `ranked_lots` before accepting. Discards LLM output and falls back to deterministic if any unknown ID is found.
+- **`resulting_ltv_if_executed`** (`nodes.py`): New field on `Recommendation`. Computed in deterministic fallback accounting for shrinking collateral (proceeds reduce both collateral and loan).
+- **Pydantic field constraints** (`nodes.py`): `Lot.quantity > 0`, `Lot.cost_basis >= 0`, `Lot.current_price >= 0`, `Account.loan_balance >= 0`, `Account.max_ltv_limit` in `(0, 1]`, `Account.cash >= 0`. Malformed fixtures now fail at ingest.
+- **Wash-sale detection** (`nodes.py`): Deterministic same-symbol-within-30-days check in `TaxOptimizerNode` (Node 3). Carried through to `ReasoningAgentNode` and `LotProposal`.
+- **Wash-sale caveat rule** (`nodes.py`): Rule 9 in `SYSTEM_PROMPT` — single-lot still warns about post-sale repurchase risk.
+- **Shrinking-collateral rule** (`server.ts`, `nodes.py`): Rule 8 — LLM must cite precomputed `resulting_ltv_if_executed`, never re-derive LTV freehand.
+- **Configurable checkpointer** (`agent.py`): `create_graph()` accepts `checkpointer_type` ("memory"/"postgres"/"sqlite") and `db_url`.
+- **`get_state()` for fallback graph** (`agent.py`): `CompiledGraph` stores state keyed by `thread_id`, returns `_StateSnapshot`.
+- **Logging throughout** (`nodes.py`, `agent.py`, `run_fixtures.py`): `logging` module replaces silent `except Exception: pass` blocks.
+- **UUID validation** (`nodes.py`): `Lot.lot_id`, `Account.account_id`, `LotProposal.lot_id` use `UUID` type with `default_factory=uuid4`.
+- **Non-standard limit fixture** (`fake_users.json`): Fixture 6 with `max_ltv_limit: 0.35` to test formula correctness.
+- **Wash-sale fixture** (`fake_users.json`): Fixture 5 with two XYZ lots 9 days apart.
+- **`langchain-openai`** (`requirements.txt`): Required for OpenRouter/Poolside OpenAI-compatible fallback.
+- **`.env.local` loading** (`agent.py`, `run_fixtures.py`, `server.ts`): All entry points now load `.env.local` explicitly.
+- **`allowedHosts: true`** (`vite.config.ts`): Allows Cloudflare tunnel hosts.
+
+### Fixed
+- **Deterministic fallback formula** (`nodes.py`): Was `deficit / 0.50` (hardcoded). Now `deficit / (1 - max_ltv_limit)` using the account's actual limit.
+- **Exception swallowing** (`nodes.py`, `run_fixtures.py`): All `except Exception: pass` blocks now log the error. `run_fixtures.py` catches only `GraphInterrupt`.
+- **`get_state()` crash** (`agent.py`): Fallback `CompiledGraph` now implements `get_state()` instead of throwing `AttributeError`.
+- **Gemini model name**: Updated to `gemini-2.5-flash` (was deprecated `gemini-2.5-flash`, then `gemini-3.1-flash-lite`).
+- **`.env` vs `.env.local` mismatch**: All entry points load `.env.local` explicitly.
+- **Mojibake in comments** (`agent.py`, `vite.config.ts`): Cleaned `参数` and `â` artifacts.
+- **Fixture JSON serialization** (`run_fixtures.py`): `json.dumps(default=str)` handles UUID objects.
+
+### Changed
+- **OpenRouter fallback model**: Updated to `google/gemma-4-26b-a4b-it:free` (native structured output support, slug verified against OpenRouter API).
+- **Temperature**: Lowered from 0.2 to 0.1 for structured output reliability.
+- **`max_retries=2`**, **`max_tokens=2048`** on all LLM init calls.
+- **Graph built once** (`run_fixtures.py`): Moved `create_graph()` outside the fixture loop.
+
+---
+
+## Known Issues / Current Provider Status
+
+| Provider | Status (2026-07-26) | Notes |
+|---|---|---|
+| Gemini (`gemini-2.5-flash`) | Quota exhausted | Free-tier limit of 20 requests/day. Falls through to OpenRouter/Poolside/deterministic. |
+| OpenRouter (`google/gemma-4-26b-a4b-it:free`) | Slug verified | Was returning 400 with incorrect slug `google/gemma-4-26b-a4b:free` (missing `-it`). Fixed. Free-tier ~200 RPD. Slug may change — re-verify against `openrouter.ai/api/v1/models` if 400 returns. |
+| Poolside (`poolside/laguna-s-2.1`) | Not yet tested | `POOLSIDE_API_KEY` not in `.env.local`. Thinking disabled via `extra_body={"thinking": False}`. Verify `method="function_calling"` works before relying on it. |
+| Deterministic fallback | Working | All 6 fixtures pass. Formula: `deficit / (1 - max_ltv_limit)`. Accounts for shrinking-collateral feedback loop. |
+
+**Free-tier caution**: Free model slugs can change without notice. Re-verify slugs against live API catalogs (`openrouter.ai/api/v1/models`, `platform.poolside.ai`) if a provider starts returning 400/404.
+
+---
+
+## [0.1.0] - 2026-07-26
+
+### Initial release
+- 6-node LangGraph pipeline: ingest → LTV monitor → tax optimizer → reasoning agent → human approval → execution.
+- React dashboard with interactive holdings table, optimization proposal, and AI chat.
+- Express backend with `/api/portfolio/analyze` and `/api/portfolio/chat` endpoints.
+- Gemini AI integration with structured output.
+- 4 synthetic test fixtures.
+- Deterministic fallback when LLM is unavailable.

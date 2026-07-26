@@ -99,5 +99,22 @@
         "acquired_date": "2026-07-10"
       }
     ]
+  },
+  {
+    "account_id": "f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f809142",
+    "name": "High Risk — Non-Standard Limit",
+    "loan_balance": 5000.0,
+    "max_ltv_limit": 0.35,
+    "cash": 0.0,
+    "holdings": [
+      {
+        "lot_id": "8ba7b814-9dad-11d1-80b4-00c04fd430c8",
+        "symbol": "QQQ",
+        "quantity": 100.0,
+        "cost_basis": 90.0,
+        "current_price": 80.0,
+        "acquired_date": "2024-01-01"
+      }
+    ]
   }
 ]
