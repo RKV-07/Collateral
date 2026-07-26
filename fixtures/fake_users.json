@@ -74,5 +74,30 @@
         "acquired_date": "2024-02-01"
       }
     ]
+  },
+  {
+    "account_id": "e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8091",
+    "name": "Wash Sale Risk Portfolio",
+    "loan_balance": 3000.0,
+    "max_ltv_limit": 0.50,
+    "cash": 0.0,
+    "holdings": [
+      {
+        "lot_id": "7ba7b812-9dad-11d1-80b4-00c04fd430c8",
+        "symbol": "XYZ",
+        "quantity": 50.0,
+        "cost_basis": 220.0,
+        "current_price": 200.0,
+        "acquired_date": "2026-07-01"
+      },
+      {
+        "lot_id": "7ba7b813-9dad-11d1-80b4-00c04fd430c8",
+        "symbol": "XYZ",
+        "quantity": 30.0,
+        "cost_basis": 190.0,
+        "current_price": 200.0,
+        "acquired_date": "2026-07-10"
+      }
+    ]
   }
 ]

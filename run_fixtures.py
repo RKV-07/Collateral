@@ -25,16 +25,15 @@ def main():
     print("      RUNNING COLLATERAL LANGGRAPH V1 FIXTURE SUITE")
     print("==================================================================\n")
 
+    graph = create_graph(source_path=fixtures_path)
+
     for idx, user_acc in enumerate(fake_users, 1):
         print(f"--- TEST FIXTURE {idx}: {user_acc['name']} ({user_acc['account_id']}) ---")
-        
-        # Initialize graph instance
-        graph = create_graph(source_path=fixtures_path)
 
         # Run up to human_approval
         initial_state = {"account": user_acc}
         config = {"configurable": {"thread_id": f"thread_{user_acc['account_id']}"}}
-        
+
         try:
             graph.invoke(initial_state, config=config)
         except Exception as e:
@@ -71,7 +70,9 @@ def main():
         print("  > Ranked Lots (Losses First):")
         for lot in ranked_lots:
             gain_loss = lot.get("unrealized_gain_loss", 0.0)
-            print(f"      - {lot['symbol']} ({lot['lot_id']}): Qty={lot['quantity']}, Gain/Loss=${gain_loss:,.2f}")
+            wash = lot.get("wash_sale_caution", False)
+            wash_tag = " [WASH SALE]" if wash else ""
+            print(f"      - {lot['symbol']} ({lot['lot_id']}): Qty={lot['quantity']}, Gain/Loss=${gain_loss:,.2f}{wash_tag}")
         print(f"  > Recommendation (Validated Pydantic Model):\n{json.dumps(rec_dict, indent=6, default=str)}")
         print(f"  > Execution Result (Should be None before approval): {result}\n")
 
@@ -86,6 +87,13 @@ def main():
             second_lot = ranked_lots[1]
             assert first_lot["unrealized_gain_loss"] < second_lot["unrealized_gain_loss"], "ERROR: TaxOptimizerNode failed to rank loss lot first"
             print("  ✓ VERIFIED: Fixture 4 (Mixed Lots) ranked loss lot before gain lot!")
+
+        if user_acc["account_id"] == "e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8091":
+            loss_lot = next(l for l in ranked_lots if l["unrealized_gain_loss"] < 0)
+            assert loss_lot["wash_sale_caution"] is True, "ERROR: wash-sale check failed to flag same-symbol lot within 30 days"
+            gain_lot = next(l for l in ranked_lots if l["unrealized_gain_loss"] > 0)
+            assert gain_lot["wash_sale_caution"] is False, "ERROR: gain lot should not have wash_sale_caution"
+            print("  ✓ VERIFIED: Wash-sale caution correctly flagged for same-symbol lot within 30 days!")
 
         assert result is None, f"ERROR: ExecutionNode executed before human approval! Result: {result}"
         print("  ✓ VERIFIED: Graph paused before ExecutionNode as required.\n")

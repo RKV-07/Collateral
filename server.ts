@@ -34,11 +34,44 @@ function getGemini(): GoogleGenAI {
   return aiClient;
 }
 
+// OpenRouter fallback (Gemini 2.0 Flash — free tier)
+async function generateViaOpenRouter(prompt: string, systemInstruction?: string): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("No OPENROUTER_API_KEY available");
+
+  const messages: { role: string; content: string }[] = [];
+  if (systemInstruction) {
+    messages.push({ role: "system", content: systemInstruction });
+  }
+  messages.push({ role: "user", content: prompt });
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      messages,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`OpenRouter ${res.status}: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
 // Check if Gemini is configured
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     hasGeminiKey: !!process.env.GEMINI_API_KEY,
+    hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
   });
 });
 
@@ -60,7 +93,7 @@ app.post("/api/portfolio/analyze", async (req, res) => {
     const deterministicResult = calculateOptimizer(snapshot, cashNeed || 0, marketEvent);
 
     let geminiExplanation = "";
-    const selectedModel = model || "gemini-2.5-flash";
+    const selectedModel = model || "gemini-3.1-flash-lite";
 
     // Generate smart rationale via Gemini if key is present
     if (process.env.GEMINI_API_KEY) {
@@ -99,8 +132,24 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
 
         geminiExplanation = response.text || "";
       } catch (geminiError: any) {
-        console.error("Gemini rationale generation failed:", geminiError);
-        geminiExplanation = `Failed to generate AI rationale using model ${selectedModel}: ${geminiError.message || geminiError}. Using fallback calculated explanation.`;
+        console.error("Gemini rationale generation failed, trying OpenRouter:", geminiError.message);
+      }
+    }
+
+    // Fallback: OpenRouter if Gemini failed or unavailable
+    if (!geminiExplanation && process.env.OPENROUTER_API_KEY) {
+      try {
+        geminiExplanation = await generateViaOpenRouter(
+          `Analyze this portfolio and propose the lowest-tax-cost way to free up funds.\n\n` +
+          `Risk State: ${deterministicResult.risk_state}\n` +
+          `Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n` +
+          `Proposed Lots: ${JSON.stringify(deterministicResult.proposed_lots_to_sell, null, 2)}\n` +
+          `Rationale: ${deterministicResult.rationale}\n\n` +
+          `Generate a short plain-English explanation (2-3 paragraphs) of the action plan.`
+        );
+        console.log("OpenRouter fallback succeeded");
+      } catch (orError: any) {
+        console.error("OpenRouter fallback failed:", orError.message);
       }
     }
 
@@ -131,16 +180,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-2.5-flash";
-
-    if (!process.env.GEMINI_API_KEY) {
-      return res.json({
-        text: "I am running in local offline mode because no Gemini API key was detected in the workspace secrets. However, our deterministic optimizer continues to function! Feel free to adjust the cash need or trigger market events using the control dashboard.",
-        model_used: selectedModel,
-      });
-    }
-
-    const ai = getGemini();
+    const selectedModel = model || "gemini-3.1-flash-lite";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.
@@ -165,21 +205,46 @@ Adhere to the following rules in every chat message:
 6. Never guarantee specific tax savings. Speak in terms of capital losses harvested or realized gains avoided.
 7. Be helpful, concise, and structured.`;
 
-    // Map chat history to standard GoogleGenAI format
-    const contents = chatHistory.map((m) => ({
-      role: m.role,
-      parts: [{ text: m.text }],
-    }));
+    let responseText = "";
 
-    const response = await ai.models.generateContent({
-      model: selectedModel,
-      contents,
-      config: {
-        systemInstruction,
-      },
-    });
+    // Try Gemini first
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const ai = getGemini();
+        const contents = chatHistory.map((m) => ({
+          role: m.role,
+          parts: [{ text: m.text }],
+        }));
+        const response = await ai.models.generateContent({
+          model: selectedModel,
+          contents,
+          config: { systemInstruction },
+        });
+        responseText = response.text || "";
+      } catch (geminiError: any) {
+        console.error("Gemini chat failed, trying OpenRouter:", geminiError.message);
+      }
+    }
 
-    res.json({ text: response.text, model_used: selectedModel });
+    // Fallback: OpenRouter if Gemini failed or unavailable
+    if (!responseText && process.env.OPENROUTER_API_KEY) {
+      try {
+        const userMessage = chatHistory.map((m) => `${m.role}: ${m.text}`).join("\n");
+        responseText = await generateViaOpenRouter(
+          `Portfolio context:\n- Risk State: ${deterministicResult.risk_state}\n- Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n- Recommended Action: ${deterministicResult.recommended_action}\n\nUser conversation:\n${userMessage}`,
+          systemInstruction
+        );
+        console.log("OpenRouter chat fallback succeeded");
+      } catch (orError: any) {
+        console.error("OpenRouter chat fallback failed:", orError.message);
+      }
+    }
+
+    if (!responseText) {
+      responseText = "No LLM available (Gemini quota exhausted, no OpenRouter key). The deterministic optimizer results are shown in the dashboard.";
+    }
+
+    res.json({ text: responseText, model_used: selectedModel });
   } catch (err: any) {
     console.error("Chat endpoint error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });

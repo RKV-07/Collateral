@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import datetime
 from typing import TypedDict, List, Dict, Any, Optional, Union
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
@@ -135,11 +136,18 @@ class LTVMonitorNode:
         }
 
 
+def _day_difference(date_str1: str, date_str2: str) -> int:
+    """Absolute day difference between two ISO date strings."""
+    d1 = datetime.fromisoformat(date_str1)
+    d2 = datetime.fromisoformat(date_str2)
+    return abs((d1 - d2).days)
+
+
 class TaxOptimizerNode:
     """Node 3 — TaxOptimizerNode
     Solves: tax-inefficient rebalancing.
-    Computes unrealized gain/loss per lot and ranks them (biggest loss first).
-    Pure deterministic Python math.
+    Computes unrealized gain/loss per lot, wash-sale risk, and ranks them (biggest loss first).
+    Pure deterministic Python math — no LLM.
     """
     def __init__(self):
         pass
@@ -173,10 +181,35 @@ class TaxOptimizerNode:
             lot_dict["unrealized_gain_loss_per_share"] = price - cost
             ranked.append(lot_dict)
 
+        # Deterministic wash-sale check: same symbol acquired within 30 days
+        for lot_dict in ranked:
+            is_loss = lot_dict["unrealized_gain_loss"] < 0
+            lot_dict["wash_sale_caution"] = is_loss and any(
+                other["lot_id"] != lot_dict["lot_id"]
+                and other["symbol"] == lot_dict["symbol"]
+                and _day_difference(lot_dict["acquired_date"], other["acquired_date"]) <= 30
+                for other in ranked
+            )
+
         # Sort ascending by unrealized gain/loss (largest loss first)
         ranked.sort(key=lambda x: x["unrealized_gain_loss"])
 
         return {"ranked_lots": ranked}
+
+
+SYSTEM_PROMPT = """You are the Reasoning node in a deterministic financial-agent pipeline called Collateral.
+
+Your ONLY job: synthesize the risk_state, headroom, and ranked_lots values you are given into a structured Recommendation. You do not have access to markets, cannot execute trades, and must not invent numbers.
+
+Hard rules:
+1. Do NOT recompute LTV, headroom, collateral value, or gain/loss — those are already computed upstream and correct. Use them as given.
+2. Do NOT recompute wash_sale_caution — it is already computed deterministically per lot. Just reflect it accurately in your rationale; do not override it or guess about it.
+3. proposed_lots must only include lots that were actually provided in ranked_lots — never invent a lot_id.
+4. If risk_state is "High Risk", recommended_action must address closing the deficit — do not recommend "maintain current positions".
+5. If risk_state is "Safe", proposed_lots should be an empty list unless the account holder explicitly needs liquidity.
+6. rationale must be 2-4 plain-English sentences, no jargon without a one-line explanation, and must explicitly note that this is not licensed financial or tax advice.
+7. Output must strictly conform to the Recommendation schema you were bound with — no extra fields, no prose outside the schema.
+"""
 
 
 class ReasoningAgentNode:
@@ -185,11 +218,13 @@ class ReasoningAgentNode:
     Uses init_chat_model and with_structured_output(Recommendation).
     This is the ONLY node allowed to invoke an LLM.
     """
-    def __init__(self, model_name: str = "gemini-2.5-flash", temperature: float = 0.2):
+    def __init__(self, model_name: str = "gemini-2.5-flash", temperature: float = 0.1):
         self.model_name = model_name
         self.temperature = temperature
         self.llm = None
         self.structured_llm = None
+        self.fallback_llm = None
+        self.fallback_structured_llm = None
 
         try:
             from langchain.chat_models import init_chat_model
@@ -197,16 +232,42 @@ class ReasoningAgentNode:
             if "GEMINI_API_KEY" in os.environ and "GOOGLE_API_KEY" not in os.environ:
                 os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
 
+            # Primary: Gemini
             api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
             if api_key:
                 self.llm = init_chat_model(
                     self.model_name,
                     model_provider="google_genai",
                     temperature=self.temperature,
+                    max_retries=2,
+                    max_tokens=2048,
                 )
                 self.structured_llm = self.llm.with_structured_output(Recommendation)
             else:
-                logger.warning("[ReasoningAgentNode] No GOOGLE_API_KEY/GEMINI_API_KEY found — falling back to deterministic recommendation")
+                logger.warning("[ReasoningAgentNode] No GOOGLE_API_KEY/GEMINI_API_KEY found")
+
+            # Fallback: OpenRouter (Gemma 4 26B — free tier, native structured output)
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+            if openrouter_key:
+                self.fallback_llm = init_chat_model(
+                    "google/gemma-4-26b-a4b-it:free",
+                    model_provider="openai",
+                    temperature=self.temperature,
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_key,
+                    max_retries=2,
+                    max_tokens=2048,
+                )
+                self.fallback_structured_llm = self.fallback_llm.with_structured_output(Recommendation)
+                if not self.structured_llm:
+                    # No primary — use OpenRouter as main
+                    self.llm = self.fallback_llm
+                    self.structured_llm = self.fallback_structured_llm
+                    self.fallback_llm = None
+                    self.fallback_structured_llm = None
+            else:
+                logger.warning("[ReasoningAgentNode] No OPENROUTER_API_KEY found — no fallback available")
+
         except Exception as e:
             logger.error("[ReasoningAgentNode] LLM init failed: %r", e)
             self.llm = None
@@ -217,23 +278,52 @@ class ReasoningAgentNode:
         headroom = state.get("headroom", 0.0)
         ranked_lots = state.get("ranked_lots", [])
 
-        prompt_text = (
-            f"You are a Tax-Minimized Liquidity Assistant.\n"
-            f"Risk State: {risk_state}\n"
-            f"Headroom ($): {headroom:.2f}\n"
-            f"Ranked Tax Lots (Losses first):\n{json.dumps(ranked_lots, indent=2, default=str)}\n\n"
-            f"Synthesize risk state, headroom, and tax-loss lots into a structured Recommendation."
+        user_data = (
+            f"risk_state: {risk_state}\n"
+            f"headroom_dollars: {headroom:.2f}\n"
+            f"ranked_lots (losses first, wash_sale_caution precomputed):\n"
+            f"{json.dumps(ranked_lots, indent=2, default=str)}"
         )
 
         recommendation: Optional[Recommendation] = None
 
+        # Try primary LLM (Gemini)
         if self.structured_llm is not None:
             try:
-                result = self.structured_llm.invoke(prompt_text)
+                result = self.structured_llm.invoke([
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_data},
+                ])
                 if isinstance(result, Recommendation):
                     recommendation = result
             except Exception as e:
-                logger.error("[ReasoningAgentNode] LLM invoke failed: %r", e)
+                logger.warning("[ReasoningAgentNode] Primary LLM invoke failed: %r — trying fallback", e)
+
+        # Try fallback LLM (OpenRouter)
+        if recommendation is None and self.fallback_structured_llm is not None:
+            try:
+                result = self.fallback_structured_llm.invoke([
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_data},
+                ])
+                if isinstance(result, Recommendation):
+                    recommendation = result
+                    logger.info("[ReasoningAgentNode] Fallback LLM (OpenRouter) succeeded")
+            except Exception as e:
+                logger.error("[ReasoningAgentNode] Fallback LLM invoke failed: %r", e)
+
+        # Validate LLM didn't hallucinate lot_ids
+        if recommendation is not None:
+            valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
+            hallucinated = [
+                p for p in recommendation.proposed_lots
+                if str(p.lot_id) not in valid_lot_ids
+            ]
+            if hallucinated:
+                logger.error(
+                    "[ReasoningAgentNode] LLM returned %d hallucinated lot_id(s) — discarding LLM output",
+                    len(hallucinated)
+                )
                 recommendation = None
 
         # Fallback structured calculation if LLM call is unavailable or fails
@@ -248,12 +338,13 @@ class ReasoningAgentNode:
                         break
                     sell_qty = min(lot["quantity"], (needed_proceeds - accumulated) / lot["current_price"])
                     realized_gl = sell_qty * lot["unrealized_gain_loss_per_share"]
+
                     proposed.append(
                         LotProposal(
                             lot_id=str(lot["lot_id"]),
                             quantity=round(sell_qty, 4),
                             realized_gain_loss=round(realized_gl, 2),
-                            wash_sale_caution=False
+                            wash_sale_caution=lot.get("wash_sale_caution", False)
                         )
                     )
                     accumulated += sell_qty * lot["current_price"]
