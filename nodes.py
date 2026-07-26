@@ -285,7 +285,7 @@ class ReasoningAgentNode:
                     api_key=poolside_key,
                     max_retries=2,
                     max_tokens=2048,
-                    extra_body={"thinking": False},
+                    extra_body={"thinking": {"type": "disabled"}},
                 )
                 self.poolside_structured_llm = self.poolside_llm.with_structured_output(
                     Recommendation, method="function_calling"

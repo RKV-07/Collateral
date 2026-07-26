@@ -31,6 +31,7 @@
 - **Mojibake in comments** (`agent.py`, `vite.config.ts`): Cleaned `参数` and `â` artifacts.
 - **Fixture JSON serialization** (`run_fixtures.py`): `json.dumps(default=str)` handles UUID objects.
 - **Gemini thinking mode** (`nodes.py`): Disabled via `thinking_budget=0` to prevent thinking-token overhead from truncating structured output.
+- **Poolside thinking format** (`nodes.py`): Fixed `extra_body` from `{"thinking": false}` to `{"thinking": {"type": "disabled"}}` — API expects a struct with `type` field, not a boolean.
 - **OpenRouter model slug** (`nodes.py`): Fixed to `google/gemma-4-26b-a4b-it:free` (was missing `-it` suffix).
 - **UUID serialization for checkpointers** (`nodes.py`): `HumanApprovalNode` now uses `model_dump(mode="json")` so UUIDs serialize to strings regardless of checkpointer backend.
 
