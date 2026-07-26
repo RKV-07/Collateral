@@ -21,12 +21,14 @@
 - **`.env.local` loading** (`agent.py`, `run_fixtures.py`, `server.ts`): All entry points now load `.env.local` explicitly.
 - **`allowedHosts: true`** (`vite.config.ts`): Allows Cloudflare tunnel hosts.
 - **OpenRouter rate-limit comment** (`nodes.py`): Documents free-tier ~20 RPM / 200 RPD quota to prevent confusion during heavy dev iteration.
+- **Poolside fallback in web UI** (`server.ts`): Added `generateViaPoolside()` function and wired into both `/api/portfolio/analyze` (rationale) and `/api/portfolio/chat` endpoints as third fallback tier.
+- **Health endpoint** (`server.ts`): `/api/health` now reports `hasPoolsideKey` alongside Gemini and OpenRouter.
 
 ### Fixed
 - **Deterministic fallback formula** (`nodes.py`): Was `deficit / 0.50` (hardcoded). Now `deficit / (1 - max_ltv_limit)` using the account's actual limit.
 - **Exception swallowing** (`nodes.py`, `run_fixtures.py`): All `except Exception: pass` blocks now log the error. `run_fixtures.py` catches only `GraphInterrupt`.
 - **`get_state()` crash** (`agent.py`): Fallback `CompiledGraph` now implements `get_state()` instead of throwing `AttributeError`.
-- **Gemini model name**: Updated to `gemini-2.5-flash` (was deprecated `gemini-2.5-flash`, then `gemini-3.1-flash-lite`).
+- **Gemini model name**: Updated to `gemini-2.5-flash` everywhere (was `gemini-3.1-flash-lite` in `server.ts`, which doesn't exist).
 - **`.env` vs `.env.local` mismatch**: All entry points load `.env.local` explicitly.
 - **Mojibake in comments** (`agent.py`, `vite.config.ts`): Cleaned `参数` and `â` artifacts.
 - **Fixture JSON serialization** (`run_fixtures.py`): `json.dumps(default=str)` handles UUID objects.
@@ -48,8 +50,8 @@
 | Provider | Status (2026-07-26) | Notes |
 |---|---|---|
 | Gemini (`gemini-2.5-flash`) | Quota exhausted, thinking disabled | Free-tier limit of 20 requests/day. Thinking disabled via `thinking_budget=0`. Falls through to OpenRouter/Poolside/deterministic. |
-| OpenRouter (`google/gemma-4-26b-a4b-it:free`) | Slug verified | Was returning 400 with incorrect slug `google/gemma-4-26b-a4b:free` (missing `-it`). Fixed. Free-tier ~200 RPD. Slug may change — re-verify against `openrouter.ai/api/v1/models` if 400 returns. |
-| Poolside (`poolside/laguna-s-2.1`) | Not yet tested | `POOLSIDE_API_KEY` not in `.env.local`. Thinking disabled via `extra_body={"thinking": False}`. Verify `method="function_calling"` works before relying on it. |
+| OpenRouter (`google/gemma-4-26b-a4b-it:free`) | Slug verified, quota exhausted | Slug fixed (was missing `-it`). Free-tier ~20 RPM / 200 RPD — daily limit hit during testing. Key works. |
+| Poolside (`poolside/laguna-s-2.1`) | Working | Thinking disabled via `{"thinking": {"type": "disabled"}}`. `method="function_calling"` confirmed working. All 6 fixtures pass with LLM-generated recommendations. |
 | Deterministic fallback | Working | All 6 fixtures pass. Formula: `deficit / (1 - max_ltv_limit)`. Accounts for shrinking-collateral feedback loop. |
 
 **Free-tier caution**: Free model slugs can change without notice. Re-verify slugs against live API catalogs (`openrouter.ai/api/v1/models`, `platform.poolside.ai`) if a provider starts returning 400/404.

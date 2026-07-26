@@ -66,12 +66,47 @@ async function generateViaOpenRouter(prompt: string, systemInstruction?: string)
   return data.choices?.[0]?.message?.content || "";
 }
 
+// Poolside fallback (Laguna S 2.1)
+async function generateViaPoolside(prompt: string, systemInstruction?: string): Promise<string> {
+  const apiKey = process.env.POOLSIDE_API_KEY;
+  if (!apiKey) throw new Error("No POOLSIDE_API_KEY available");
+
+  const messages: { role: string; content: string }[] = [];
+  if (systemInstruction) {
+    messages.push({ role: "system", content: systemInstruction });
+  }
+  messages.push({ role: "user", content: prompt });
+
+  const res = await fetch("https://inference.poolside.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "poolside/laguna-s-2.1",
+      messages,
+      thinking: { type: "disabled" },
+      max_tokens: 2048,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Poolside ${res.status}: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
 // Check if Gemini is configured
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     hasGeminiKey: !!process.env.GEMINI_API_KEY,
     hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
+    hasPoolsideKey: !!process.env.POOLSIDE_API_KEY,
   });
 });
 
@@ -93,7 +128,7 @@ app.post("/api/portfolio/analyze", async (req, res) => {
     const deterministicResult = calculateOptimizer(snapshot, cashNeed || 0, marketEvent);
 
     let geminiExplanation = "";
-    const selectedModel = model || "gemini-3.1-flash-lite";
+    const selectedModel = model || "gemini-2.5-flash";
 
     // Generate smart rationale via Gemini if key is present
     if (process.env.GEMINI_API_KEY) {
@@ -153,6 +188,23 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
       }
     }
 
+    // Fallback: Poolside if OpenRouter also failed or unavailable
+    if (!geminiExplanation && process.env.POOLSIDE_API_KEY) {
+      try {
+        geminiExplanation = await generateViaPoolside(
+          `Analyze this portfolio and propose the lowest-tax-cost way to free up funds.\n\n` +
+          `Risk State: ${deterministicResult.risk_state}\n` +
+          `Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n` +
+          `Proposed Lots: ${JSON.stringify(deterministicResult.proposed_lots_to_sell, null, 2)}\n` +
+          `Rationale: ${deterministicResult.rationale}\n\n` +
+          `Generate a short plain-English explanation (2-3 paragraphs) of the action plan.`
+        );
+        console.log("Poolside fallback succeeded");
+      } catch (psError: any) {
+        console.error("Poolside fallback failed:", psError.message);
+      }
+    }
+
     res.json({
       ...deterministicResult,
       gemini_rationale: geminiExplanation || deterministicResult.rationale,
@@ -180,7 +232,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-3.1-flash-lite";
+    const selectedModel = model || "gemini-2.5-flash";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.
@@ -241,8 +293,22 @@ Adhere to the following rules in every chat message:
       }
     }
 
+    // Fallback: Poolside if OpenRouter also failed or unavailable
+    if (!responseText && process.env.POOLSIDE_API_KEY) {
+      try {
+        const userMessage = chatHistory.map((m) => `${m.role}: ${m.text}`).join("\n");
+        responseText = await generateViaPoolside(
+          `Portfolio context:\n- Risk State: ${deterministicResult.risk_state}\n- Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n- Recommended Action: ${deterministicResult.recommended_action}\n\nUser conversation:\n${userMessage}`,
+          systemInstruction
+        );
+        console.log("Poolside chat fallback succeeded");
+      } catch (psError: any) {
+        console.error("Poolside chat fallback failed:", psError.message);
+      }
+    }
+
     if (!responseText) {
-      responseText = "No LLM available (Gemini quota exhausted, no OpenRouter key). The deterministic optimizer results are shown in the dashboard.";
+      responseText = "No LLM available (all providers exhausted). The deterministic optimizer results are shown in the dashboard.";
     }
 
     res.json({ text: responseText, model_used: selectedModel });

@@ -25,10 +25,19 @@ Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes 
 
 1. **Gemini** (`gemini-2.5-flash`) — primary (thinking disabled via `thinking_budget=0`)
 2. **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) — fallback 1
-3. **Poolside** (`poolside/laguna-s-2.1` at `inference.poolside.ai`) — fallback 2 (thinking disabled for clean structured output)
+3. **Poolside** (`poolside/laguna-s-2.1` at `inference.poolside.ai`) — fallback 2 (thinking disabled via `{"thinking": {"type": "disabled"}}`)
 4. **Deterministic** — no LLM needed; computes a safe fallback recommendation
 
 All providers use `with_structured_output(Recommendation, method="function_calling")` for schema-constrained output. LLM output is validated against known lot IDs to reject hallucinated references.
+
+### Web UI Fallback Chain
+
+The Express backend (`server.ts`) uses the same 3-provider chain for rationale generation and chat:
+
+1. **Gemini** (`gemini-2.5-flash`) — primary
+2. **OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`) — fallback 1
+3. **Poolside** (`poolside/laguna-s-2.1`) — fallback 2 (thinking disabled)
+4. **Deterministic text** — returns optimizer results as plain text
 
 ## Correct LTV Formula
 
@@ -98,7 +107,7 @@ All keys go in `.env.local` (loaded by both Python and Node entry points).
 | `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), all 6 node classes, `SYSTEM_PROMPT` (9 rules) |
 | `agent.py` | LangGraph `StateGraph` builder, configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` |
 | `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures, asserts correctness |
-| `server.ts` | Express backend — Gemini + OpenRouter fallback, chat + analyze endpoints |
+| `server.ts` | Express backend — Gemini + OpenRouter + Poolside fallback chain, chat + analyze endpoints, `/api/health` |
 | `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math |
 | `fixtures/fake_users.json` | 6 synthetic test accounts |
 | `requirements.txt` | Python deps including `langchain-openai` |
