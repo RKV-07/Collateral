@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### Added
-- **Poolside API fallback** (`nodes.py`): Third LLM provider via `POOLSIDE_API_KEY`, uses `poolside/laguna-s-2.1` at `inference.poolside.ai`. Chains Gemini → OpenRouter → Poolside → deterministic fallback.
+- **Zyloo provider** (`nodes.py`, `server.ts`): Replaced Gemini direct API with Zyloo proxy (`api.zyloo.io/v1`) — OpenAI-compatible endpoint with free Gemini/GPT models. Primary provider for both Python and Node.
+- **Poolside API fallback** (`nodes.py`): Third LLM provider via `POOLSIDE_API_KEY`, uses `poolside/laguna-s-2.1` at `inference.poolside.ai`. Chains Zyloo → OpenRouter → Poolside → deterministic fallback.
 - **System/user prompt split** (`nodes.py`): `SYSTEM_PROMPT` constant with 9 hard rules, sent as separate system message via `.invoke([system, user])` for better structured-output adherence.
 - **Hallucinated lot_id guard** (`nodes.py`): Validates LLM-proposed `lot_id`s against `ranked_lots` before accepting. Discards LLM output and falls back to deterministic if any unknown ID is found.
 - **`resulting_ltv_if_executed`** (`nodes.py`): New field on `Recommendation`. Computed in deterministic fallback accounting for shrinking collateral (proceeds reduce both collateral and loan).
@@ -28,7 +29,7 @@
 - **Deterministic fallback formula** (`nodes.py`): Was `deficit / 0.50` (hardcoded). Now `deficit / (1 - max_ltv_limit)` using the account's actual limit.
 - **Exception swallowing** (`nodes.py`, `run_fixtures.py`): All `except Exception: pass` blocks now log the error. `run_fixtures.py` catches only `GraphInterrupt`.
 - **`get_state()` crash** (`agent.py`): Fallback `CompiledGraph` now implements `get_state()` instead of throwing `AttributeError`.
-- **Gemini model name**: Updated to `gemini-2.5-flash` everywhere (was `gemini-3.1-flash-lite` in `server.ts`, which doesn't exist).
+- **Gemini model name**: Removed Gemini direct API. Replaced with Zyloo proxy (`api.zyloo.io/v1`) using free models (`gemini-2.5-flash-free`, etc.).
 - **`.env` vs `.env.local` mismatch**: All entry points load `.env.local` explicitly.
 - **Mojibake in comments** (`agent.py`, `vite.config.ts`): Cleaned `参数` and `â` artifacts.
 - **Fixture JSON serialization** (`run_fixtures.py`): `json.dumps(default=str)` handles UUID objects.
@@ -49,7 +50,7 @@
 
 | Provider | Status (2026-07-26) | Notes |
 |---|---|---|
-| Gemini (`gemini-2.5-flash`) | Quota exhausted, thinking disabled | Free-tier limit of 20 requests/day. Thinking disabled via `thinking_budget=0`. Falls through to OpenRouter/Poolside/deterministic. |
+| Zyloo (`gemini-2.5-flash-free`) | Primary | Free Gemini/GPT models via `api.zyloo.io/v1`. Replaces Gemini direct API. Models: `gemini-2.5-flash-free`, `gemini-3-pro-preview-free`, `gpt-4.1-free`, `gpt-4o-free`. |
 | OpenRouter (`google/gemma-4-26b-a4b-it:free`) | Slug verified, quota exhausted | Slug fixed (was missing `-it`). Free-tier ~20 RPM / 200 RPD — daily limit hit during testing. Key works. |
 | Poolside (`poolside/laguna-s-2.1`) | Working | Thinking disabled via `{"thinking": {"type": "disabled"}}`. `method="function_calling"` confirmed working. All 6 fixtures pass with LLM-generated recommendations. |
 | Deterministic fallback | Working | All 6 fixtures pass. Formula: `deficit / (1 - max_ltv_limit)`. Accounts for shrinking-collateral feedback loop. |

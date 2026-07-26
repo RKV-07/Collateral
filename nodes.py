@@ -221,7 +221,7 @@ class ReasoningAgentNode:
     Uses init_chat_model and with_structured_output(Recommendation).
     This is the ONLY node allowed to invoke an LLM.
     """
-    def __init__(self, model_name: str = "gemini-2.5-flash", temperature: float = 0.1):
+    def __init__(self, model_name: str = "gemini-2.5-flash-free", temperature: float = 0.1):
         self.model_name = model_name
         self.temperature = temperature
         self.llm = None
@@ -233,25 +233,24 @@ class ReasoningAgentNode:
 
         from langchain.chat_models import init_chat_model
 
-        # Primary: Gemini
-        if "GEMINI_API_KEY" in os.environ and "GOOGLE_API_KEY" not in os.environ:
-            os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if api_key:
+        # Primary: Zyloo (OpenAI-compatible proxy — free Gemini/GPT models)
+        zyloo_key = os.environ.get("ZYLOO_API_KEY")
+        if zyloo_key:
             try:
                 self.llm = init_chat_model(
-                    self.model_name,
-                    model_provider="google_genai",
+                    "gemini-2.5-flash-free",
+                    model_provider="openai",
                     temperature=self.temperature,
+                    base_url="https://api.zyloo.io/v1",
+                    api_key=zyloo_key,
                     max_retries=2,
                     max_tokens=2048,
-                    thinking_budget=0,
                 )
                 self.structured_llm = self.llm.with_structured_output(
                     Recommendation, method="function_calling"
                 )
             except Exception as e:
-                logger.error("[ReasoningAgentNode] Gemini init failed: %s", str(e))
+                logger.error("[ReasoningAgentNode] Zyloo init failed: %s", str(e))
 
         # Fallback 1: OpenRouter (google/gemma-4-26b-a4b-it:free — slug verified 2026-07-26)
         # NOTE: Free tier ~20 RPM / 200 RPD. If invoke() fails during heavy dev iteration, check quota first.
@@ -316,7 +315,7 @@ class ReasoningAgentNode:
         recommendation = None
 
         for label, structured_llm in [
-            ("Gemini", self.structured_llm),
+            ("Zyloo", self.structured_llm),
             ("OpenRouter", self.fallback_structured_llm),
             ("Poolside", self.poolside_structured_llm),
         ]:

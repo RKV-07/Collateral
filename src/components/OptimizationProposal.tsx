@@ -4,13 +4,13 @@ import { ShieldCheck, AlertCircle, FileText, ChevronDown, ChevronUp, CheckCircle
 
 interface OptimizationProposalProps {
   proposal: ProposalOutput;
-  geminiRationale: string;
+  aiRationale: string;
   onApprove: () => void;
   isLoading: boolean;
   selectedModel?: string;
 }
 
-export default function OptimizationProposal({ proposal, geminiRationale, onApprove, isLoading, selectedModel = "gemini-2.5-flash" }: OptimizationProposalProps) {
+export default function OptimizationProposal({ proposal, aiRationale, onApprove, isLoading, selectedModel = "gemini-2.5-flash-free" }: OptimizationProposalProps) {
   const [showJson, setShowJson] = useState(false);
   const [isApprovedSuccessfully, setIsApprovedSuccessfully] = useState(false);
 
@@ -164,7 +164,7 @@ export default function OptimizationProposal({ proposal, geminiRationale, onAppr
               Agent compiling lowest-tax-cost proposal...
             </div>
           ) : (
-            geminiRationale
+            aiRationale
           )}
         </div>
       </div>

@@ -6,7 +6,7 @@ This document provides a comprehensive walkthrough of the **Portfolio Liquidity,
 
 ## 1. Codebase Directory & File Guide
 
-### A. Web Application Architecture (React + Express + Gemini)
+### A. Web Application Architecture (React + Express + Zyloo)
 
 *   **`/src/App.tsx`**: Main UI container for the Elegant Dark dashboard. Orchestrates real-time state for portfolio holdings, active loan balances, market stress test sliders, optimization proposals, and the AI advisor chat desk.
 *   **`/src/types.ts`**: TypeScript definitions for `HoldingLot`, `AccountSnapshot`, `OptimizationProposal`, `ProposedTrade`, and `ChatMessage`. Ensures static type safety across client and API handlers.
@@ -14,8 +14,8 @@ This document provides a comprehensive walkthrough of the **Portfolio Liquidity,
 *   **`/src/presets.ts`**: Pre-configured scenario presets (*Standard Baseline*, *Margin Call Stress Test*, *Tax-Harvesting Opportunity*, *Conservative Asset Mix*) for instant sandbox testing.
 *   **`/src/components/HoldingsTable.tsx`**: Interactive asset tax lot manager allowing CRUD operations for tax lots (Symbol, Quantity, Cost Basis, Current Price, Purchase Date) with live unrealized gain/loss tracking.
 *   **`/src/components/OptimizationProposal.tsx`**: LTV metric gauge, headroom deficit alert banner, pro-forma rebalancing proposals, and the compliance approval step.
-*   **`/src/components/ChatAssistant.tsx`**: Interactive AI advisor desk interface enabling what-if queries, strategy explanations, and tax planning suggestions via Gemini API.
-*   **`/server.ts`**: Express backend proxying client requests to the `@google/genai` SDK, keeping API keys safe on the server side.
+*   **`/src/components/ChatAssistant.tsx`**: Interactive AI advisor desk interface enabling what-if queries, strategy explanations, and tax planning suggestions via Zyloo API.
+*   **`/server.ts`**: Express backend proxying client requests to the Zyloo API (`api.zyloo.io/v1`), keeping API keys safe on the server side.
 
 ### B. Python LangGraph Agent Architecture (KISS v1)
 
@@ -24,7 +24,7 @@ This document provides a comprehensive walkthrough of the **Portfolio Liquidity,
     1.  `IngestPortfolioNode`: Ingests and normalizes multi-account portfolio JSON into `state["account"]`.
     2.  `LTVMonitorNode`: Computes `collateral_value`, `current_ltv`, `headroom`, and `risk_state` ("Safe", "Warning", "High Risk").
     3.  `TaxOptimizerNode`: Ranks asset lots by unrealized gain/loss (largest losses first for tax-loss harvesting).
-    4.  `ReasoningAgentNode`: Synthesizes LTV metrics and ranked lots into a structured recommendation (uses `ChatGoogleGenerativeAI` or structured fallback).
+    4.  `ReasoningAgentNode`: Synthesizes LTV metrics and ranked lots into a structured recommendation (uses Zyloo/OpenRouter/Poolside via `init_chat_model` or structured fallback).
     5.  `HumanApprovalNode`: Pauses graph execution via `interrupt()` to require human supervisor authorization.
     6.  `ExecutionNode`: Logs the final trade action ("would execute" or "rejected") upon human approval.
 *   **`/fixtures/fake_users.json`**: Synthetic test dataset containing 4 account scenarios (*Safe*, *Warning*, *High Risk Breached*, and *Mixed Tax Lots*).
@@ -75,4 +75,4 @@ Lots are sorted in ascending order of unrealized gain/loss ($-\$3,000$ loss come
 1.  **Reg T vs. Portfolio Margin**: Standard Regulation T margin (50% initial, 25% maintenance) vs. risk-based Portfolio Margin (TIMS option pricing risk models).
 2.  **IRC Section 1091 (Wash Sales)**: Rules governing tax loss disallowances across personal, IRA, and spousal accounts.
 3.  **LangGraph State Management & Interrupts**: Building human-in-the-loop agent workflows using state checkpointers (`MemorySaver`) and `interrupt()`.
-4.  **Structured JSON Generation with Gemini**: Using `@google/genai` or `langchain-google-genai` with strict Pydantic schemas to ensure LLM outputs return parseable JSON.
+4.  **Structured JSON Generation with Zyloo**: Using `init_chat_model` with OpenAI-compatible API (`api.zyloo.io/v1`) and strict Pydantic schemas to ensure LLM outputs return parseable JSON.

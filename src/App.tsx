@@ -23,11 +23,11 @@ import {
 } from "lucide-react";
 
 const AVAILABLE_MODELS = [
-  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", badge: "Recommended", desc: "Fastest response with top reasoning quality" },
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", badge: "Deep Reasoning", desc: "Maximum analytical depth for complex tax strategies" },
-  { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", badge: "Low Latency", desc: "Next-gen low-latency model for instant chat" },
-  { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", badge: "Lightweight", desc: "High efficiency for rapid metric checking" },
-  { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", badge: "High Context", desc: "Legacy pro model with extensive context support" },
+  { id: "gemini-2.5-flash-free", name: "Gemini 2.5 Flash", badge: "Recommended", desc: "Fastest response with top reasoning quality" },
+  { id: "gemini-3-pro-preview-free", name: "Gemini 3 Pro", badge: "Deep Reasoning", desc: "Maximum analytical depth for complex tax strategies" },
+  { id: "gemini-3-flash-preview-free", name: "Gemini 3 Flash", badge: "Low Latency", desc: "Next-gen low-latency model for instant chat" },
+  { id: "gpt-4.1-free", name: "GPT-4.1", badge: "OpenAI", desc: "OpenAI flagship model for general reasoning" },
+  { id: "gpt-4o-free", name: "GPT-4o", badge: "Multimodal", desc: "Fast multimodal model for quick analysis" },
 ];
 
 export default function App() {
@@ -35,7 +35,7 @@ export default function App() {
   const [selectedPreset, setSelectedPreset] = useState<string>("breached");
   
   // Model selection
-  const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash");
+  const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-free");
 
   // Custom portfolio states
   const [cash, setCash] = useState<number>(0);
@@ -57,7 +57,7 @@ export default function App() {
     };
     return calculateOptimizer(initSnap, 0, undefined);
   });
-  const [geminiRationale, setGeminiRationale] = useState<string>("");
+  const [aiRationale, setAiRationale] = useState<string>("");
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
 
   // Sync state when switching presets
@@ -94,7 +94,7 @@ export default function App() {
     const localResult = calculateOptimizer(currentSnap, cashNeed, marketEvent);
     setProposal(localResult);
 
-    // Then fetch server-side analysis which triggers the smart Gemini explanations
+    // Then fetch server-side analysis which triggers the smart AI explanations
     setIsAiLoading(true);
     try {
       const response = await fetch("/api/portfolio/analyze", {
@@ -108,15 +108,15 @@ export default function App() {
         }),
       });
       const data = await response.json();
-      if (response.ok && data.gemini_rationale) {
-        setGeminiRationale(data.gemini_rationale);
+      if (response.ok && data.ai_rationale) {
+        setAiRationale(data.ai_rationale);
       } else {
-        setGeminiRationale(localResult.rationale);
+        setAiRationale(localResult.rationale);
       }
     } catch (err) {
       console.error("AI Analysis error:", err);
       // Fallback to our perfect deterministic local rationale
-      setGeminiRationale(localResult.rationale);
+      setAiRationale(localResult.rationale);
     } finally {
       setIsAiLoading(false);
     }
@@ -224,7 +224,7 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-8 mt-8 flex flex-col gap-8">
         
-        {/* Gemini Model Selector Card */}
+        {/* AI Model Selector Card */}
         <section className="bg-[#111113] border border-white/10 rounded-2xl p-6 shadow-xl">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 pb-3 border-b border-white/10">
             <div className="flex items-center gap-2.5">
@@ -232,8 +232,8 @@ export default function App() {
                 <Sparkles size={16} />
               </span>
               <div>
-                <h2 className="font-sans font-medium text-sm text-white">Gemini AI Model Engine</h2>
-                <p className="text-xs text-white/40">Select the Gemini intelligence model for real-time portfolio analysis & strategy generation</p>
+                <h2 className="font-sans font-medium text-sm text-white">AI Model Engine</h2>
+                <p className="text-xs text-white/40">Select the intelligence model for real-time portfolio analysis & strategy generation</p>
               </div>
             </div>
             <span className="text-[11px] font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-1 rounded-full uppercase tracking-wider shrink-0">
@@ -457,7 +457,7 @@ export default function App() {
             {/* Tax Lot Optimization Execution Proposal */}
             <OptimizationProposal 
               proposal={proposal} 
-              geminiRationale={geminiRationale} 
+              aiRationale={aiRationale} 
               onApprove={handleApproveRebalance} 
               isLoading={isAiLoading}
               selectedModel={selectedModel}

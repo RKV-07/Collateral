@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
 import { calculateOptimizer, getAdjustedSnapshot } from "./src/utils.js";
 import { AccountSnapshot, MarketEvent } from "./src/types.js";
 
@@ -14,27 +13,33 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Lazy-initialize Gemini client
-let aiClient: GoogleGenAI | null = null;
-function getGemini(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY environment variable is required");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
+// Zyloo API helper (OpenAI-compatible — free Gemini/GPT models)
+async function generateViaZyloo(
+  messages: { role: string; content: string }[],
+  model: string = "gemini-2.5-flash-free"
+): Promise<string> {
+  const apiKey = process.env.ZYLOO_API_KEY;
+  if (!apiKey) throw new Error("No ZYLOO_API_KEY available");
+
+  const res = await fetch("https://api.zyloo.io/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model, messages, max_tokens: 2048 }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Zyloo ${res.status}: ${err}`);
   }
-  return aiClient;
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
 }
 
-// OpenRouter fallback (Gemini 2.0 Flash — free tier)
+// OpenRouter fallback
 async function generateViaOpenRouter(prompt: string, systemInstruction?: string): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("No OPENROUTER_API_KEY available");
@@ -100,17 +105,17 @@ async function generateViaPoolside(prompt: string, systemInstruction?: string): 
   return data.choices?.[0]?.message?.content || "";
 }
 
-// Check if Gemini is configured
+// Check if providers are configured
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    hasGeminiKey: !!process.env.GEMINI_API_KEY,
+    hasZylooKey: !!process.env.ZYLOO_API_KEY,
     hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
     hasPoolsideKey: !!process.env.POOLSIDE_API_KEY,
   });
 });
 
-// API: Analyze Portfolio and generate Gemini Rationale
+// API: Analyze Portfolio and generate AI Rationale
 app.post("/api/portfolio/analyze", async (req, res) => {
   try {
     const { snapshot, cashNeed, marketEvent, model } = req.body as {
@@ -127,16 +132,13 @@ app.post("/api/portfolio/analyze", async (req, res) => {
     // Run deterministic calculation
     const deterministicResult = calculateOptimizer(snapshot, cashNeed || 0, marketEvent);
 
-    let geminiExplanation = "";
-    const selectedModel = model || "gemini-2.5-flash";
+    let aiExplanation = "";
+    const selectedModel = model || "gemini-2.5-flash-free";
 
-    // Generate smart rationale via Gemini if key is present
-    if (process.env.GEMINI_API_KEY) {
+    // Generate smart rationale via Zyloo if key is present
+    if (process.env.ZYLOO_API_KEY) {
       try {
-        const ai = getGemini();
-        const response = await ai.models.generateContent({
-          model: selectedModel,
-          contents: `Analyze this portfolio snapshot and the tax-lot optimizer's output. Propose the single lowest-tax-cost way to free up funds based strictly on the optimizer's decisions.
+        const rationalePrompt = `Analyze this portfolio snapshot and the tax-lot optimizer's output. Propose the single lowest-tax-cost way to free up funds based strictly on the optimizer's decisions.
 
 Portfolio State:
 - Collateral Value: $${(snapshot.holdings.reduce((sum, h) => sum + h.quantity * h.current_price, 0)).toLocaleString()}
@@ -162,19 +164,21 @@ Strict Guardrails to follow:
 3. You never execute trades or transfers yourself. Remind the user that their approval is strictly required before any of these trades can be processed.
 4. Never guarantee specific tax dollars saved. Speak only in terms of realized gains/losses.
 
-Generate a highly polished, short plain-English explanation (approx 2-3 paragraphs) explaining the action plan and why we chose these specific lots. Let the user know they can click 'Approve & Execute' in the UI to proceed.`,
-        });
+Generate a highly polished, short plain-English explanation (approx 2-3 paragraphs) explaining the action plan and why we chose these specific lots. Let the user know they can click 'Approve & Execute' in the UI to proceed.`;
 
-        geminiExplanation = response.text || "";
-      } catch (geminiError: any) {
-        console.error("Gemini rationale generation failed, trying OpenRouter:", geminiError.message);
+        aiExplanation = await generateViaZyloo([
+          { role: "user", content: rationalePrompt },
+        ], selectedModel);
+        console.log("Zyloo rationale generation succeeded");
+      } catch (zylooError: any) {
+        console.error("Zyloo rationale generation failed, trying OpenRouter:", zylooError.message);
       }
     }
 
-    // Fallback: OpenRouter if Gemini failed or unavailable
-    if (!geminiExplanation && process.env.OPENROUTER_API_KEY) {
+    // Fallback: OpenRouter if Zyloo failed or unavailable
+    if (!aiExplanation && process.env.OPENROUTER_API_KEY) {
       try {
-        geminiExplanation = await generateViaOpenRouter(
+        aiExplanation = await generateViaOpenRouter(
           `Analyze this portfolio and propose the lowest-tax-cost way to free up funds.\n\n` +
           `Risk State: ${deterministicResult.risk_state}\n` +
           `Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n` +
@@ -189,9 +193,9 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
     }
 
     // Fallback: Poolside if OpenRouter also failed or unavailable
-    if (!geminiExplanation && process.env.POOLSIDE_API_KEY) {
+    if (!aiExplanation && process.env.POOLSIDE_API_KEY) {
       try {
-        geminiExplanation = await generateViaPoolside(
+        aiExplanation = await generateViaPoolside(
           `Analyze this portfolio and propose the lowest-tax-cost way to free up funds.\n\n` +
           `Risk State: ${deterministicResult.risk_state}\n` +
           `Headroom: $${deterministicResult.headroom_dollars.toLocaleString()}\n` +
@@ -207,7 +211,7 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
 
     res.json({
       ...deterministicResult,
-      gemini_rationale: geminiExplanation || deterministicResult.rationale,
+      ai_rationale: aiExplanation || deterministicResult.rationale,
       model_used: selectedModel,
     });
   } catch (err: any) {
@@ -232,7 +236,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-2.5-flash";
+    const selectedModel = model || "gemini-2.5-flash-free";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.
@@ -260,26 +264,21 @@ Adhere to the following rules in every chat message:
 
     let responseText = "";
 
-    // Try Gemini first
-    if (process.env.GEMINI_API_KEY) {
+    // Try Zyloo first
+    if (process.env.ZYLOO_API_KEY) {
       try {
-        const ai = getGemini();
-        const contents = chatHistory.map((m) => ({
-          role: m.role,
-          parts: [{ text: m.text }],
-        }));
-        const response = await ai.models.generateContent({
-          model: selectedModel,
-          contents,
-          config: { systemInstruction },
-        });
-        responseText = response.text || "";
-      } catch (geminiError: any) {
-        console.error("Gemini chat failed, trying OpenRouter:", geminiError.message);
+        const messages = [
+          { role: "system", content: systemInstruction },
+          ...chatHistory.map((m) => ({ role: m.role === "model" ? "assistant" : m.role, content: m.text })),
+        ];
+        responseText = await generateViaZyloo(messages, selectedModel);
+        console.log("Zyloo chat succeeded");
+      } catch (zylooError: any) {
+        console.error("Zyloo chat failed, trying OpenRouter:", zylooError.message);
       }
     }
 
-    // Fallback: OpenRouter if Gemini failed or unavailable
+    // Fallback: OpenRouter if Zyloo failed or unavailable
     if (!responseText && process.env.OPENROUTER_API_KEY) {
       try {
         const userMessage = chatHistory.map((m) => `${m.role}: ${m.text}`).join("\n");
