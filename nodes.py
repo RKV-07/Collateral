@@ -209,6 +209,7 @@ Hard rules:
 5. If risk_state is "Safe", proposed_lots should be an empty list unless the account holder explicitly needs liquidity.
 6. rationale must be 2-4 plain-English sentences, no jargon without a one-line explanation, and must explicitly note that this is not licensed financial or tax advice.
 7. Output must strictly conform to the Recommendation schema you were bound with — no extra fields, no prose outside the schema.
+8. If asked to explain resulting LTV after a hypothetical sale, do not compute new LTV values yourself — collateral value decreases by the amount sold (shrinking-collateral feedback loop), which is easy to get wrong. Only speak in terms of the given risk_state/headroom, or explicitly state that a precise pro-forma figure requires re-running the optimizer.
 """
 
 

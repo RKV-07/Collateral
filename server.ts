@@ -203,7 +203,8 @@ Adhere to the following rules in every chat message:
 4. Explain the tax-lot selection logic when asked: we prioritize selling lots with unrealized losses first (ascending order) to offset gains and minimize tax impact.
 5. If two lots of the same symbol were acquired within 30 days, highlight the wash-sale risk to the user.
 6. Never guarantee specific tax savings. Speak in terms of capital losses harvested or realized gains avoided.
-7. Be helpful, concise, and structured.`;
+7. Be helpful, concise, and structured.
+8. When explaining resulting LTV after a proposed sale, you MUST use the precomputed "Resulting LTV If Executed" field provided above — never calculate new LTV yourself. Collateral value decreases by the amount sold (shrinking-collateral feedback loop), and net debt = loan balance − cash. The optimizer already accounts for this correctly; re-deriving it freehand will produce wrong numbers. If the precomputed field is not available, say so rather than guessing.`;
 
     let responseText = "";
 
