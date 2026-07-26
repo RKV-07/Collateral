@@ -245,6 +245,7 @@ class ReasoningAgentNode:
                     temperature=self.temperature,
                     max_retries=2,
                     max_tokens=2048,
+                    thinking_budget=0,
                 )
                 self.structured_llm = self.llm.with_structured_output(
                     Recommendation, method="function_calling"
@@ -252,7 +253,8 @@ class ReasoningAgentNode:
             except Exception as e:
                 logger.error("[ReasoningAgentNode] Gemini init failed: %s", str(e))
 
-        # Fallback 1: OpenRouter
+        # Fallback 1: OpenRouter (google/gemma-4-26b-a4b-it:free — slug verified 2026-07-26)
+        # NOTE: Free tier ~20 RPM / 200 RPD. If invoke() fails during heavy dev iteration, check quota first.
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             try:
@@ -403,7 +405,7 @@ class HumanApprovalNode:
             return {"approved": bool(state["approved"])}
 
         rec = state.get("recommendation")
-        rec_data = rec.model_dump() if isinstance(rec, Recommendation) else rec
+        rec_data = rec.model_dump(mode="json") if isinstance(rec, Recommendation) else rec
 
         try:
             from langgraph.types import interrupt
