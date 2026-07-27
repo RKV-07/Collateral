@@ -16,7 +16,7 @@ app.use(express.json());
 // Zyloo API helper (OpenAI-compatible — free Gemini/GPT models)
 async function generateViaZyloo(
   messages: { role: string; content: string }[],
-  model: string = "gemini-2.5-flash-free"
+  model: string = "gemini-3-flash-preview-free"
 ): Promise<string> {
   const apiKey = process.env.ZYLOO_API_KEY;
   if (!apiKey) throw new Error("No ZYLOO_API_KEY available");
@@ -57,7 +57,7 @@ async function generateViaOpenRouter(prompt: string, systemInstruction?: string)
       "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      model: "google/gemma-4-26b-a4b-it:free",
       messages,
     }),
   });
@@ -133,11 +133,20 @@ app.post("/api/portfolio/analyze", async (req, res) => {
     const deterministicResult = calculateOptimizer(snapshot, cashNeed || 0, marketEvent);
 
     let aiExplanation = "";
-    const selectedModel = model || "gemini-2.5-flash-free";
+    let providerUsed = "deterministic";
+    const selectedModel = model || "gemini-3-flash-preview-free";
 
     // Generate smart rationale via Zyloo if key is present
     if (process.env.ZYLOO_API_KEY) {
       try {
+        const rationaleSystem = `You are the Liquidity & Tax Optimizer Agent (using model: ${selectedModel}). Be highly precise, objective, professional, and non-expert friendly. Do not use financial jargon without explaining it.
+
+Strict Guardrails:
+1. State plainly and once that you are not a licensed financial or tax advisor and this is not individualized advice. Do not omit or bury this.
+2. If the account is in an active margin call (headroom < 0), lead with this fact prominently and clearly. Do not soften or bury it.
+3. You never execute trades or transfers yourself. Remind the user that their approval is strictly required before any of these trades can be processed.
+4. Never guarantee specific tax dollars saved. Speak only in terms of realized gains/losses.`;
+
         const rationalePrompt = `Analyze this portfolio snapshot and the tax-lot optimizer's output. Propose the single lowest-tax-cost way to free up funds based strictly on the optimizer's decisions.
 
 Portfolio State:
@@ -155,20 +164,13 @@ Optimizer Decisions & Deterministic Results:
 - Proposed Lots to Sell: ${JSON.stringify(deterministicResult.proposed_lots_to_sell, null, 2)}
 - System Rationale: ${deterministicResult.rationale}
 
-Role & Tone:
-You are the Liquidity & Tax Optimizer Agent (using model: ${selectedModel}). Be highly precise, objective, professional, and non-expert friendly. Do not use financial jargon without explaining it.
-
-Strict Guardrails to follow:
-1. State plainly and once that you are not a licensed financial or tax advisor and this is not individualized advice. Do not omit or bury this.
-2. If the account is in an active margin call (headroom < 0), lead with this fact prominently and clearly. Do not soften or bury it.
-3. You never execute trades or transfers yourself. Remind the user that their approval is strictly required before any of these trades can be processed.
-4. Never guarantee specific tax dollars saved. Speak only in terms of realized gains/losses.
-
 Generate a highly polished, short plain-English explanation (approx 2-3 paragraphs) explaining the action plan and why we chose these specific lots. Let the user know they can click 'Approve & Execute' in the UI to proceed.`;
 
         aiExplanation = await generateViaZyloo([
+          { role: "system", content: rationaleSystem },
           { role: "user", content: rationalePrompt },
         ], selectedModel);
+        providerUsed = "zyloo";
         console.log("Zyloo rationale generation succeeded");
       } catch (zylooError: any) {
         console.error("Zyloo rationale generation failed, trying OpenRouter:", zylooError.message);
@@ -186,6 +188,7 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
           `Rationale: ${deterministicResult.rationale}\n\n` +
           `Generate a short plain-English explanation (2-3 paragraphs) of the action plan.`
         );
+        providerUsed = "openrouter";
         console.log("OpenRouter fallback succeeded");
       } catch (orError: any) {
         console.error("OpenRouter fallback failed:", orError.message);
@@ -203,6 +206,7 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
           `Rationale: ${deterministicResult.rationale}\n\n` +
           `Generate a short plain-English explanation (2-3 paragraphs) of the action plan.`
         );
+        providerUsed = "poolside";
         console.log("Poolside fallback succeeded");
       } catch (psError: any) {
         console.error("Poolside fallback failed:", psError.message);
@@ -213,9 +217,64 @@ Generate a highly polished, short plain-English explanation (approx 2-3 paragrap
       ...deterministicResult,
       ai_rationale: aiExplanation || deterministicResult.rationale,
       model_used: selectedModel,
+      provider: providerUsed,
     });
   } catch (err: any) {
     console.error("Analysis endpoint error:", err);
+    res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
+// API: Export full audit trail for a portfolio analysis
+app.post("/api/portfolio/audit", async (req, res) => {
+  try {
+    const { snapshot, cashNeed, marketEvent } = req.body as {
+      snapshot: AccountSnapshot;
+      cashNeed?: number;
+      marketEvent?: MarketEvent;
+    };
+
+    if (!snapshot || !snapshot.holdings) {
+      return res.status(400).json({ error: "Missing required portfolio snapshot data." });
+    }
+
+    const deterministicResult = calculateOptimizer(snapshot, cashNeed || 0, marketEvent);
+
+    const auditTrail = {
+      timestamp: new Date().toISOString(),
+      input: {
+        account: snapshot,
+        cash_need: cashNeed || 0,
+        market_event: marketEvent || null,
+      },
+      computed: {
+        collateral_value: snapshot.holdings.reduce((sum, h) => sum + h.quantity * h.current_price, 0),
+        loan_balance: snapshot.loan_balance,
+        maintenance_ltv_limit: snapshot.maintenance_ltv_limit,
+        cash: snapshot.cash,
+        net_debt: snapshot.loan_balance - snapshot.cash,
+        current_ltv: deterministicResult.current_ltv,
+        headroom: deterministicResult.headroom_dollars,
+        risk_state: deterministicResult.risk_state,
+      },
+      optimizer_output: {
+        recommended_action: deterministicResult.recommended_action,
+        proposed_lots: deterministicResult.proposed_lots_to_sell,
+        resulting_ltv_if_executed: deterministicResult.resulting_ltv_if_executed,
+        rationale: deterministicResult.rationale,
+      },
+      meta: {
+        engine: "Collateral Deterministic Optimizer v1",
+        formula: "Liquidation Required = Deficit / (1 - Maintenance LTV Limit)",
+        wash_sale_detection: "Same-symbol-within-30-days (IRC Section 1091)",
+      },
+    };
+
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="collateral-audit-${Date.now()}.json"`);
+    res.json(auditTrail);
+  } catch (err: any) {
+    console.error("Audit endpoint error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
   }
 });
@@ -236,7 +295,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-2.5-flash-free";
+    const selectedModel = model || "gemini-3-flash-preview-free";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.

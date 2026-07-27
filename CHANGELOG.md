@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **Export audit trail** (`server.ts`, `OptimizationProposal.tsx`): New `POST /api/portfolio/audit` endpoint returns full decision trail (input, computed metrics, optimizer output, metadata) as JSON with `Content-Disposition: attachment`. Client-side "Export Audit Trail" button downloads the same data directly from the browser.
+- **Pre-flight health check** (`check_providers.py`): Script pings Zyloo, OpenRouter, and Poolside APIs, reports which providers are alive before a demo.
 - **Zyloo provider** (`nodes.py`, `server.ts`): Replaced Gemini direct API with Zyloo proxy (`api.zyloo.io/v1`) — OpenAI-compatible endpoint with free Gemini/GPT models. Primary provider for both Python and Node.
 - **Poolside API fallback** (`nodes.py`): Third LLM provider via `POOLSIDE_API_KEY`, uses `poolside/laguna-s-2.1` at `inference.poolside.ai`. Chains Zyloo → OpenRouter → Poolside → deterministic fallback.
 - **System/user prompt split** (`nodes.py`): `SYSTEM_PROMPT` constant with 9 hard rules, sent as separate system message via `.invoke([system, user])` for better structured-output adherence.
@@ -26,6 +28,8 @@
 - **Health endpoint** (`server.ts`): `/api/health` now reports `hasPoolsideKey` alongside Gemini and OpenRouter.
 
 ### Fixed
+- **Python 3.14 hang** (`.venv`): Recreated venv on Python 3.10 — `langchain_core.messages` imports hung indefinitely on Python 3.14.
+- **`vite.config.ts` type error** (`allowedHosts: true`): Fixed with `as const` — Vite expects literal `true`, not `boolean`.
 - **Deterministic fallback formula** (`nodes.py`): Was `deficit / 0.50` (hardcoded). Now `deficit / (1 - max_ltv_limit)` using the account's actual limit.
 - **Exception swallowing** (`nodes.py`, `run_fixtures.py`): All `except Exception: pass` blocks now log the error. `run_fixtures.py` catches only `GraphInterrupt`.
 - **`get_state()` crash** (`agent.py`): Fallback `CompiledGraph` now implements `get_state()` instead of throwing `AttributeError`.
@@ -50,7 +54,7 @@
 
 | Provider | Status (2026-07-26) | Notes |
 |---|---|---|
-| Zyloo (`gemini-2.5-flash-free`) | Primary | Free Gemini/GPT models via `api.zyloo.io/v1`. Replaces Gemini direct API. Models: `gemini-2.5-flash-free`, `gemini-3-pro-preview-free`, `gpt-4.1-free`, `gpt-4o-free`. |
+| Zyloo (`gemini-3-flash-preview-free`) | Primary | Free Gemini/GPT models via `api.zyloo.io/v1`. Replaces Gemini direct API. Models: `gemini-3-flash-preview-free`, `gemini-3-pro-preview-free`, `gpt-4.1-free`, `gpt-4o-free`. |
 | OpenRouter (`google/gemma-4-26b-a4b-it:free`) | Slug verified, quota exhausted | Slug fixed (was missing `-it`). Free-tier ~20 RPM / 200 RPD — daily limit hit during testing. Key works. |
 | Poolside (`poolside/laguna-s-2.1`) | Working | Thinking disabled via `{"thinking": {"type": "disabled"}}`. `method="function_calling"` confirmed working. All 6 fixtures pass with LLM-generated recommendations. |
 | Deterministic fallback | Working | All 6 fixtures pass. Formula: `deficit / (1 - max_ltv_limit)`. Accounts for shrinking-collateral feedback loop. |

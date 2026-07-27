@@ -23,7 +23,7 @@ Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes 
 
 `ReasoningAgentNode` tries providers in order, falling through on failure:
 
-1. **Zyloo** (`gemini-2.5-flash-free`) — primary (OpenAI-compatible proxy with free Gemini/GPT models)
+1. **Zyloo** (`gemini-3-flash-preview-free`) — primary (OpenAI-compatible proxy with free Gemini/GPT models)
 2. **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) — fallback 1
 3. **Poolside** (`poolside/laguna-s-2.1` at `inference.poolside.ai`) — fallback 2 (thinking disabled via `{"thinking": {"type": "disabled"}}`)
 4. **Deterministic** — no LLM needed; computes a safe fallback recommendation
@@ -34,8 +34,8 @@ All providers use `with_structured_output(Recommendation, method="function_calli
 
 The Express backend (`server.ts`) uses the same 3-provider chain for rationale generation and chat:
 
-1. **Zyloo** (`gemini-2.5-flash-free`) — primary
-2. **OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`) — fallback 1
+1. **Zyloo** (`gemini-3-flash-preview-free`) — primary
+2. **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) — fallback 1
 3. **Poolside** (`poolside/laguna-s-2.1`) — fallback 2 (thinking disabled)
 4. **Deterministic text** — returns optimizer results as plain text
 
@@ -100,6 +100,14 @@ python run_fixtures.py
 
 Runs all 6 fixtures through the graph and prints pass/fail assertions.
 
+### Pre-flight Health Check
+
+```bash
+python check_providers.py
+```
+
+Pings Zyloo, OpenRouter, and Poolside. Reports which providers are available before a demo.
+
 ## Environment Variables
 
 | Variable | Required | Purpose |
@@ -117,7 +125,8 @@ All keys go in `.env.local` (loaded by both Python and Node entry points).
 | `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), all 6 node classes, `SYSTEM_PROMPT` (9 rules) |
 | `agent.py` | LangGraph `StateGraph` builder, configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` |
 | `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures, asserts correctness |
-| `server.ts` | Express backend — Zyloo + OpenRouter + Poolside fallback chain, chat + analyze endpoints, `/api/health` |
+| `server.ts` | Express backend — Zyloo + OpenRouter + Poolside fallback chain, chat + analyze + audit endpoints, `/api/health` |
 | `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math |
+| `check_providers.py` | Pre-flight health check — pings all 3 providers and reports availability |
 | `fixtures/fake_users.json` | 6 synthetic test accounts |
-| `requirements.txt` | Python deps including `langchain-openai` |
+| `requirements.txt` | Python deps including `langchain-openai` (requires Python 3.10+) |

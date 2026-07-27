@@ -9,7 +9,7 @@ interface ChatAssistantProps {
   selectedModel?: string;
 }
 
-export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDescription, selectedModel = "gemini-2.5-flash-free" }: ChatAssistantProps) {
+export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDescription, selectedModel = "gemini-3-flash-preview-free" }: ChatAssistantProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "model",

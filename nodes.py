@@ -221,7 +221,7 @@ class ReasoningAgentNode:
     Uses init_chat_model and with_structured_output(Recommendation).
     This is the ONLY node allowed to invoke an LLM.
     """
-    def __init__(self, model_name: str = "gemini-2.5-flash-free", temperature: float = 0.1):
+    def __init__(self, model_name: str = "gemini-3-flash-preview-free", temperature: float = 0.1):
         self.model_name = model_name
         self.temperature = temperature
         self.llm = None
@@ -238,7 +238,7 @@ class ReasoningAgentNode:
         if zyloo_key:
             try:
                 self.llm = init_chat_model(
-                    "gemini-2.5-flash-free",
+                    "zyloo/gemini-3-flash-preview-free",
                     model_provider="openai",
                     temperature=self.temperature,
                     base_url="https://api.zyloo.io/v1",

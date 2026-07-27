@@ -35,7 +35,7 @@ export default function App() {
   const [selectedPreset, setSelectedPreset] = useState<string>("breached");
   
   // Model selection
-  const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-free");
+  const [selectedModel, setSelectedModel] = useState<string>("gemini-3-flash-preview-free");
 
   // Custom portfolio states
   const [cash, setCash] = useState<number>(0);
@@ -58,6 +58,7 @@ export default function App() {
     return calculateOptimizer(initSnap, 0, undefined);
   });
   const [aiRationale, setAiRationale] = useState<string>("");
+  const [aiProvider, setAiProvider] = useState<string>("deterministic");
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
 
   // Sync state when switching presets
@@ -110,13 +111,16 @@ export default function App() {
       const data = await response.json();
       if (response.ok && data.ai_rationale) {
         setAiRationale(data.ai_rationale);
+        setAiProvider(data.provider || "deterministic");
       } else {
         setAiRationale(localResult.rationale);
+        setAiProvider("deterministic");
       }
     } catch (err) {
       console.error("AI Analysis error:", err);
       // Fallback to our perfect deterministic local rationale
       setAiRationale(localResult.rationale);
+      setAiProvider("deterministic");
     } finally {
       setIsAiLoading(false);
     }
@@ -461,6 +465,7 @@ export default function App() {
               onApprove={handleApproveRebalance} 
               isLoading={isAiLoading}
               selectedModel={selectedModel}
+              provider={aiProvider}
             />
 
             {/* Interactive Chat Assistant */}

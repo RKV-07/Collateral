@@ -5,8 +5,9 @@ python-dotenv>=1.0
 # LangGraph pipeline (required)
 langgraph>=0.2.0
 langchain>=0.3.0
-langchain-google-genai>=2.0.0
 langchain-openai>=0.3.0
+
+# langchain-google-genai>=2.0.0   # only needed if you re-add direct Gemini access
 
 # Checkpointer backends (optional — pick what you need)
 # langgraph-checkpoint-postgres   # for PostgresSaver

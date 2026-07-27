@@ -8,9 +8,10 @@ interface OptimizationProposalProps {
   onApprove: () => void;
   isLoading: boolean;
   selectedModel?: string;
+  provider?: string;
 }
 
-export default function OptimizationProposal({ proposal, aiRationale, onApprove, isLoading, selectedModel = "gemini-2.5-flash-free" }: OptimizationProposalProps) {
+export default function OptimizationProposal({ proposal, aiRationale, onApprove, isLoading, selectedModel = "gemini-3-flash-preview-free", provider = "deterministic" }: OptimizationProposalProps) {
   const [showJson, setShowJson] = useState(false);
   const [isApprovedSuccessfully, setIsApprovedSuccessfully] = useState(false);
 
@@ -167,6 +168,21 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
             aiRationale
           )}
         </div>
+        {!isLoading && (
+          <div className="flex items-center gap-2 mt-2">
+            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
+              provider === 'deterministic' ? 'bg-gray-500/10 text-gray-400 border border-gray-500/20' :
+              provider === 'zyloo' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
+              provider === 'openrouter' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' :
+              'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+            }`}>
+              {provider === 'deterministic' ? 'Computed deterministically' :
+               provider === 'zyloo' ? `Explained by ${selectedModel}` :
+               provider === 'openrouter' ? 'Explained by OpenRouter (fallback)' :
+               'Explained by Poolside (fallback)'}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Human Approval Step Guardrails */}
@@ -227,6 +243,32 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
             }, null, 2)}</pre>
           </div>
         )}
+      </div>
+
+      {/* Export Audit Trail */}
+      <div className="border-t border-white/10 pt-4">
+        <button
+          onClick={() => {
+            const auditData = {
+              timestamp: new Date().toISOString(),
+              model_used: selectedModel,
+              provider,
+              proposal,
+              ai_rationale: aiRationale,
+            };
+            const blob = new Blob([JSON.stringify(auditData, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `collateral-audit-${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+          }}
+          className="flex items-center gap-1.5 text-xs text-white/30 font-mono hover:text-white transition cursor-pointer"
+        >
+          <FileText size={14} />
+          Export Audit Trail
+        </button>
       </div>
     </div>
   );

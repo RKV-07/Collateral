@@ -185,8 +185,13 @@ export function calculateOptimizer(
 
   // Build recommended action
   let recommended_action: "none" | "post_more_collateral" | "sell_lots" | "mixed" = "none";
-  if (proposed_lots_to_sell.length > 0) {
+  const isShort = remaining_target > 0.01;
+  if (proposed_lots_to_sell.length > 0 && !isShort) {
     recommended_action = "sell_lots";
+  } else if (proposed_lots_to_sell.length > 0 && isShort) {
+    recommended_action = "mixed"; // sold everything available, still short — needs more collateral too
+  } else if (shortfall > 0 && proposed_lots_to_sell.length === 0) {
+    recommended_action = "post_more_collateral"; // no sellable lots at all
   }
 
   // Build rationale explanation
