@@ -72,11 +72,10 @@ export function calculateOptimizer(
     risk_reasoning = `Account LTV is healthy with $${headroom.toLocaleString()} in borrowing headroom.`;
   }
 
-  // If a market event is present and implies an imminent breach (or is already High Risk)
-  if (marketEvent && risk_state !== "High Risk") {
-    // If warning, a small additional drop could breach. Or if specified by event.
+  // If a market event pushes headroom below zero, escalate to High Risk
+  if (marketEvent && risk_state !== "High Risk" && headroom < 0) {
     risk_state = "High Risk";
-    risk_reasoning = `Market Event "${marketEvent.description}" implies elevated risk of margin breach. Headroom has narrowed to $${headroom.toLocaleString()} (Current LTV: ${(current_ltv * 100).toFixed(1)}%).`;
+    risk_reasoning = `Market Event "${marketEvent.description}" caused margin breach. Headroom is now $${headroom.toLocaleString()} (Current LTV: ${(current_ltv * 100).toFixed(1)}%).`;
   }
 
   // Determine shortfall

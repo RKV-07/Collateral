@@ -1,14 +1,16 @@
 import React, { useState } from "react";
 import { HoldingLot, ProposedLot } from "../types";
-import { Trash2, Plus, Calendar, Coins, ShieldAlert, Edit2, Check, X } from "lucide-react";
+import { Trash2, Plus, Calendar, Coins, ShieldAlert, Edit2, Check, X, RefreshCw } from "lucide-react";
 
 interface HoldingsTableProps {
   holdings: HoldingLot[];
   proposedLots: ProposedLot[];
   onUpdateHoldings: (newHoldings: HoldingLot[]) => void;
+  onRefreshPrices?: () => void;
+  isRefreshingPrices?: boolean;
 }
 
-export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings }: HoldingsTableProps) {
+export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings, onRefreshPrices, isRefreshingPrices }: HoldingsTableProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -97,6 +99,17 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
           {isAdding ? <X size={14} /> : <Plus size={14} />}
           {isAdding ? "Cancel" : "Add Tax Lot"}
         </button>
+        {onRefreshPrices && (
+          <button
+            id="btn-refresh-prices"
+            onClick={onRefreshPrices}
+            disabled={isRefreshingPrices}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white rounded-lg text-xs font-medium transition cursor-pointer disabled:opacity-40"
+          >
+            <RefreshCw size={13} className={isRefreshingPrices ? "animate-spin" : ""} />
+            {isRefreshingPrices ? "Refreshing..." : "Refresh Live Prices"}
+          </button>
+        )}
       </div>
 
       {isAdding && (

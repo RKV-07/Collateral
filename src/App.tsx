@@ -25,7 +25,6 @@ import {
 const AVAILABLE_MODELS = [
   { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B", badge: "Recommended", desc: "Best for structured output and function calling" },
   { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B", badge: "Fastest", desc: "Ultra-low latency for quick responses" },
-  { id: "mixtral-8x7b-32768", name: "Mixtral 8x7B", badge: "Long Context", desc: "32K context for complex multi-turn conversations" },
   { id: "gemma2-9b-it", name: "Gemma 2 9B", badge: "Compact", desc: "Lightweight and efficient for simple tasks" },
 ];
 
@@ -59,6 +58,7 @@ export default function App() {
   const [aiRationale, setAiRationale] = useState<string>("");
   const [aiProvider, setAiProvider] = useState<string>("deterministic");
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+  const [isRefreshingPrices, setIsRefreshingPrices] = useState<boolean>(false);
 
   // Sync state when switching presets
   const handleLoadPreset = (key: string) => {
@@ -71,6 +71,35 @@ export default function App() {
       setHoldings(preset.snapshot.holdings);
       setCashNeed(0);
       setMarketDropPct(0);
+    }
+  };
+
+  // Fetch live market prices via yfinance backend
+  const handleRefreshPrices = async () => {
+    if (isRefreshingPrices) return;
+    setIsRefreshingPrices(true);
+    try {
+      const symbols = holdings.map((h) => h.symbol);
+      const response = await fetch("/api/portfolio/prices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols }),
+      });
+      const data = await response.json();
+      if (response.ok && data.prices) {
+        const updatedHoldings = holdings.map((lot) => {
+          const live = data.prices[lot.symbol];
+          if (live && live.price > 0) {
+            return { ...lot, current_price: live.price };
+          }
+          return lot;
+        });
+        setHoldings(updatedHoldings);
+      }
+    } catch (err) {
+      console.error("Live price refresh failed:", err);
+    } finally {
+      setIsRefreshingPrices(false);
     }
   };
 
@@ -454,7 +483,9 @@ export default function App() {
             <HoldingsTable 
               holdings={holdings} 
               proposedLots={proposal.proposed_lots_to_sell} 
-              onUpdateHoldings={setHoldings} 
+              onUpdateHoldings={setHoldings}
+              onRefreshPrices={handleRefreshPrices}
+              isRefreshingPrices={isRefreshingPrices}
             />
 
             {/* Tax Lot Optimization Execution Proposal */}

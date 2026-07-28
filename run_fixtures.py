@@ -5,6 +5,7 @@ Test runner script executing all synthetic fake user accounts through the LangGr
 import json
 import logging
 import os
+import time
 from dotenv import load_dotenv
 
 # Load environment variables before test execution
@@ -101,6 +102,10 @@ def main():
 
         assert result is None, f"ERROR: ExecutionNode executed before human approval! Result: {result}"
         print("  ✓ VERIFIED: Graph paused before ExecutionNode as required.\n")
+
+        # Rate-limit: wait 2 seconds between fixtures to avoid Groq 429s
+        if idx < len(fake_users):
+            time.sleep(2)
 
     print("==================================================================")
     print("      ALL FIXTURES COMPLETED & VERIFIED SUCCESSFULLY! ✓")

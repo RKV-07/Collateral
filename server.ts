@@ -346,7 +346,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-3-flash-preview";
+    const selectedModel = model || "llama-3.3-70b-versatile";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.
