@@ -122,7 +122,7 @@ python check_providers.py
 |---|---|
 | `.env.local` | Your actual API keys (gitignored — never commit) |
 | `.env.example` | Template showing which keys are needed |
-| `.gitignore` | Ignores `.venv/`, `__pycache__/`, `.env*`, `node_modules/`, `PROJECT_DUMP.txt` |
+| `.gitignore` | Ignores `.venv/`, `__pycache__/`, `.env*`, `node_modules/` |
 | `fixtures/fake_users.json` | 6 synthetic test accounts (Safe, Warning, High Risk, Mixed Lots, Wash Sale, Non-Standard Limit) |
 | `package.json` | Node dependencies and scripts (`dev`, `build`, `lint`) |
 | `tsconfig.json` | TypeScript configuration |
