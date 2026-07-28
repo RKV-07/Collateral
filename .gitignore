@@ -2,7 +2,10 @@ node_modules/
 build/
 dist/
 coverage/
+.venv/
+__pycache__/
 .DS_Store
 *.log
 .env*
 !.env.example
+PROJECT_DUMP.txt

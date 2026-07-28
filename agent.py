@@ -84,11 +84,12 @@ if HAS_LANGGRAPH:
         source_path: str = "fixtures/fake_users.json",
         checkpointer_type: str = "memory",
         db_url: str = None,
+        use_live_prices: bool = True,
     ):
         builder = StateGraph(AgentState)
 
         # Instantiate nodes
-        ingest = IngestPortfolioNode(source_path=source_path)
+        ingest = IngestPortfolioNode(source_path=source_path, use_live_prices=use_live_prices)
         ltv_monitor = LTVMonitorNode()
         tax_optimizer = TaxOptimizerNode()
         reasoning_agent = ReasoningAgentNode()
@@ -189,10 +190,11 @@ else:
         source_path: str = "fixtures/fake_users.json",
         checkpointer_type: str = "memory",
         db_url: str = None,
+        use_live_prices: bool = True,
     ):
         builder = CustomStateGraph(AgentState)
 
-        ingest = IngestPortfolioNode(source_path=source_path)
+        ingest = IngestPortfolioNode(source_path=source_path, use_live_prices=use_live_prices)
         ltv_monitor = LTVMonitorNode()
         tax_optimizer = TaxOptimizerNode()
         reasoning_agent = ReasoningAgentNode()

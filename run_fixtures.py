@@ -25,7 +25,7 @@ def main():
     print("      RUNNING COLLATERAL LANGGRAPH V1 FIXTURE SUITE")
     print("==================================================================\n")
 
-    graph = create_graph(source_path=fixtures_path)
+    graph = create_graph(source_path=fixtures_path, use_live_prices=False)
 
     for idx, user_acc in enumerate(fake_users, 1):
         print(f"--- TEST FIXTURE {idx}: {user_acc['name']} ({user_acc['account_id']}) ---")

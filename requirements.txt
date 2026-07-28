@@ -9,6 +9,15 @@ langchain-openai>=0.3.0
 
 # langchain-google-genai>=2.0.0   # only needed if you re-add direct Gemini access
 
+# Real-time market prices (optional but recommended)
+yfinance>=0.2.40
+
+# MCP server (optional — exposes optimizer as Claude-callable tools)
+fastmcp>=3.0.0,<4.0.0
+
+# Slack webhook alerts (optional)
+requests>=2.31.0
+
 # Checkpointer backends (optional — pick what you need)
 # langgraph-checkpoint-postgres   # for PostgresSaver
 # psycopg[binary]                 # postgres driver for PostgresSaver

@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Optional yfinance import — falls back to static prices if unavailable
+try:
+    import yfinance as yf
+    YF_AVAILABLE = True
+except ImportError:
+    YF_AVAILABLE = False
+    logger.warning("yfinance not installed — using static prices from fixtures. Install with: pip install yfinance")
+
 # --- Pydantic Data & Schema Models ---
 
 class Lot(BaseModel):
@@ -47,6 +55,7 @@ class AgentState(TypedDict, total=False):
     headroom: float                           # set by node 2
     risk_state: str                           # "Safe" | "Warning" | "High Risk" — node 2
     ranked_lots: List[Dict[str, Any]]         # set by node 3
+    cash_need: float                          # optional: cash withdrawal request
     recommendation: Recommendation            # set by node 4 (Pydantic model)
     approved: bool                            # set by node 5
     result: Dict[str, Any]                    # set by node 6
@@ -56,10 +65,39 @@ class IngestPortfolioNode:
     """Node 1 — IngestPortfolioNode
     Solves: fragmented asset liquidity.
     Normalizes raw account JSON and validates into a Pydantic Account model.
+    If yfinance is installed, fetches real-time market prices for each holding.
     A malformed fixture fails loudly at ingest instead of downstream math.
     """
-    def __init__(self, source_path: str = "fixtures/fake_users.json"):
+    def __init__(self, source_path: str = "fixtures/fake_users.json", use_live_prices: bool = True):
         self.source_path = source_path
+        self.use_live_prices = use_live_prices
+
+    def _fetch_live_prices(self, holdings: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Fetch real-time prices via yfinance for a list of holdings.
+        Returns {symbol: price} dict. Falls back to empty dict on failure.
+        """
+        if not YF_AVAILABLE:
+            return {}
+
+        symbols = list({h.get("symbol") for h in holdings if h.get("symbol")})
+        if not symbols:
+            return {}
+
+        prices = {}
+        for symbol in symbols:
+            try:
+                ticker = yf.Ticker(symbol)
+                info = ticker.fast_info
+                price = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+                if price and price > 0:
+                    prices[symbol] = float(price)
+                    logger.info("[IngestPortfolioNode] Fetched live price for %s: $%.2f", symbol, price)
+                else:
+                    logger.warning("[IngestPortfolioNode] No price data for %s — using static price", symbol)
+            except Exception as e:
+                logger.warning("[IngestPortfolioNode] yfinance failed for %s: %s", symbol, str(e))
+
+        return prices
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         if "account" in state and state["account"]:
@@ -78,6 +116,29 @@ class IngestPortfolioNode:
             raw_data = data[0] if isinstance(data, list) else data
             account_model = Account.model_validate(raw_data)
 
+        # Fetch live prices and update holdings
+        holdings_dicts = [h.model_dump() if isinstance(h, Lot) else h for h in account_model.holdings]
+        live_prices = self._fetch_live_prices(holdings_dicts) if self.use_live_prices else {}
+
+        if live_prices:
+            updated_holdings = []
+            for lot in account_model.holdings:
+                lot_dict = lot.model_dump() if isinstance(lot, Lot) else dict(lot)
+                symbol = lot_dict.get("symbol", "")
+                if symbol in live_prices:
+                    old_price = lot_dict["current_price"]
+                    lot_dict["current_price"] = live_prices[symbol]
+                    logger.info("[IngestPortfolioNode] Updated %s: $%.2f → $%.2f", symbol, old_price, live_prices[symbol])
+                updated_holdings.append(Lot.model_validate(lot_dict))
+            account_model = Account(
+                account_id=account_model.account_id,
+                name=account_model.name,
+                loan_balance=account_model.loan_balance,
+                max_ltv_limit=account_model.max_ltv_limit,
+                cash=account_model.cash,
+                holdings=updated_holdings,
+            )
+
         return {"account": account_model}
 
 
@@ -85,10 +146,31 @@ class LTVMonitorNode:
     """Node 2 — LTVMonitorNode
     Solves: manual LTV tracking.
     Computes collateral_value, current_ltv, headroom, and risk_state.
+    Sends Slack webhook immediately when risk_state is "High Risk".
     Pure deterministic Python math.
     """
-    def __init__(self):
-        pass
+    def __init__(self, slack_webhook_url: str = None):
+        self.slack_webhook = slack_webhook_url or os.getenv("SLACK_WEBHOOK_URL")
+
+    def _send_slack_alert(self, current_ltv: float, headroom: float, risk_state: str) -> None:
+        """Send Slack webhook immediately when High Risk is detected."""
+        if not self.slack_webhook or risk_state != "High Risk":
+            return
+
+        message = {
+            "text": f"High Risk — Margin Call Risk Detected\n"
+                    f"Current LTV: {current_ltv:.1%}\n"
+                    f"Headroom: ${headroom:,.0f}\n"
+                    f"Action required: Sell holdings or post collateral to restore headroom.\n"
+                    f"_This is an automated alert from Collateral. Not financial advice._"
+        }
+
+        try:
+            import requests as _requests
+            _requests.post(self.slack_webhook, json=message, timeout=10)
+            logger.info("[LTVMonitorNode] Slack alert sent for High Risk state")
+        except Exception as e:
+            logger.error("[LTVMonitorNode] Slack webhook failed: %s", str(e))
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         account = state.get("account")
@@ -128,6 +210,9 @@ class LTVMonitorNode:
             risk_state = "Warning"
         else:
             risk_state = "Safe"
+
+        # Proactive alert: fire immediately when High Risk is detected
+        self._send_slack_alert(current_ltv, headroom, risk_state)
 
         return {
             "collateral_value": collateral_value,
@@ -221,7 +306,7 @@ class ReasoningAgentNode:
     Uses init_chat_model and with_structured_output(Recommendation).
     This is the ONLY node allowed to invoke an LLM.
     """
-    def __init__(self, model_name: str = "gemini-3-flash-preview-free", temperature: float = 0.1):
+    def __init__(self, model_name: str = "llama-3.3-70b-versatile", temperature: float = 0.1):
         self.model_name = model_name
         self.temperature = temperature
         self.llm = None
@@ -233,16 +318,16 @@ class ReasoningAgentNode:
 
         from langchain.chat_models import init_chat_model
 
-        # Primary: Zyloo (OpenAI-compatible proxy — free Gemini/GPT models)
-        zyloo_key = os.environ.get("ZYLOO_API_KEY")
-        if zyloo_key:
+        # Primary: Groq (fast inference, free tier ~14,400 req/day)
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
             try:
                 self.llm = init_chat_model(
-                    "zyloo/gemini-3-flash-preview-free",
+                    "llama-3.3-70b-versatile",
                     model_provider="openai",
                     temperature=self.temperature,
-                    base_url="https://api.zyloo.io/v1",
-                    api_key=zyloo_key,
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=groq_key,
                     max_retries=2,
                     max_tokens=2048,
                 )
@@ -250,29 +335,9 @@ class ReasoningAgentNode:
                     Recommendation, method="function_calling"
                 )
             except Exception as e:
-                logger.error("[ReasoningAgentNode] Zyloo init failed: %s", str(e))
+                logger.error("[ReasoningAgentNode] Groq init failed: %s", str(e))
 
-        # Fallback 1: OpenRouter (google/gemma-4-26b-a4b-it:free — slug verified 2026-07-26)
-        # NOTE: Free tier ~20 RPM / 200 RPD. If invoke() fails during heavy dev iteration, check quota first.
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if openrouter_key:
-            try:
-                self.fallback_llm = init_chat_model(
-                    "google/gemma-4-26b-a4b-it:free",  # slug verified against openrouter.ai on 2026-07-26
-                    model_provider="openai",
-                    temperature=self.temperature,
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=openrouter_key,
-                    max_retries=2,
-                    max_tokens=2048,
-                )
-                self.fallback_structured_llm = self.fallback_llm.with_structured_output(
-                    Recommendation, method="function_calling"
-                )
-            except Exception as e:
-                logger.error("[ReasoningAgentNode] OpenRouter init failed: %s", str(e))
-
-        # Fallback 2: Poolside
+        # Fallback 1: Poolside
         poolside_key = os.environ.get("POOLSIDE_API_KEY")
         if poolside_key:
             try:
@@ -292,6 +357,26 @@ class ReasoningAgentNode:
             except Exception as e:
                 logger.error("[ReasoningAgentNode] Poolside init failed: %s", str(e))
 
+        # Fallback 2: OpenRouter (google/gemma-4-26b-a4b-it:free — slug verified 2026-07-26)
+        # NOTE: Free tier ~20 RPM / 200 RPD. If invoke() fails during heavy dev iteration, check quota first.
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if openrouter_key:
+            try:
+                self.fallback_llm = init_chat_model(
+                    "google/gemma-4-26b-a4b-it:free",  # slug verified against openrouter.ai on 2026-07-26
+                    model_provider="openai",
+                    temperature=self.temperature,
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_key,
+                    max_retries=2,
+                    max_tokens=2048,
+                )
+                self.fallback_structured_llm = self.fallback_llm.with_structured_output(
+                    Recommendation, method="function_calling"
+                )
+            except Exception as e:
+                logger.error("[ReasoningAgentNode] OpenRouter init failed: %s", str(e))
+
         if not any([self.structured_llm, self.fallback_structured_llm, self.poolside_structured_llm]):
             logger.warning("[ReasoningAgentNode] No LLM providers initialized — will use deterministic fallback only")
 
@@ -299,11 +384,13 @@ class ReasoningAgentNode:
         risk_state = state.get("risk_state", "Safe")
         headroom = state.get("headroom", 0.0)
         ranked_lots = state.get("ranked_lots", [])
+        cash_need = float(state.get("cash_need", 0.0))
         valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
 
         user_data = (
             f"risk_state: {risk_state}\n"
             f"headroom_dollars: {headroom:.2f}\n"
+            f"cash_need_requested: {cash_need:.2f}\n"
             f"ranked_lots (losses first, wash_sale_caution precomputed):\n"
             f"{json.dumps(ranked_lots, indent=2, default=str)}"
         )
@@ -315,9 +402,9 @@ class ReasoningAgentNode:
         recommendation = None
 
         for label, structured_llm in [
-            ("Zyloo", self.structured_llm),
-            ("OpenRouter", self.fallback_structured_llm),
+            ("Groq", self.structured_llm),
             ("Poolside", self.poolside_structured_llm),
+            ("OpenRouter", self.fallback_structured_llm),
         ]:
             if recommendation is not None or structured_llm is None:
                 continue
@@ -337,11 +424,15 @@ class ReasoningAgentNode:
         # Fallback structured calculation if LLM call is unavailable or fails
         if recommendation is None:
             proposed = []
-            if headroom < 0:
-                account_obj = state.get("account")
-                max_ltv_limit = account_obj.max_ltv_limit if isinstance(account_obj, Account) else float(account_obj.get("max_ltv_limit", 0.50)) if isinstance(account_obj, dict) else 0.50
-                deficit = abs(headroom)
-                needed_proceeds = deficit / (1 - max_ltv_limit)
+            account_obj = state.get("account")
+            max_ltv_limit = account_obj.max_ltv_limit if isinstance(account_obj, Account) else float(account_obj.get("max_ltv_limit", 0.50)) if isinstance(account_obj, dict) else 0.50
+
+            # Total proceeds needed = deficit remediation + cash withdrawal
+            deficit = abs(headroom) if headroom < 0 else 0.0
+            deficit_proceeds = deficit / (1 - max_ltv_limit) if deficit > 0 else 0.0
+            needed_proceeds = deficit_proceeds + cash_need
+
+            if needed_proceeds > 0:
                 accumulated = 0.0
                 for lot in ranked_lots:
                     if accumulated >= needed_proceeds:
@@ -367,15 +458,23 @@ class ReasoningAgentNode:
                 cash_after = (account_obj.cash if isinstance(account_obj, Account) else float(account_obj.get("cash", 0))) + total_proceeds
                 net_debt_after = loan_after - cash_after
                 resulting_ltv = (net_debt_after / collateral_after) if collateral_after > 0 else 0.0
+            else:
+                resulting_ltv = None
 
+            # Build action and rationale based on what triggered the sale
+            if deficit > 0 and cash_need > 0:
+                rec_action = "Liquidate holdings to restore headroom and fulfill cash withdrawal."
+                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit plus a ${cash_need:.2f} cash withdrawal request. Total needed: ${needed_proceeds:.2f}. Proposed selling losses first to maximize tax harvesting."
+            elif deficit > 0:
                 rec_action = "Liquidate tax-loss holdings to restore borrowing headroom."
                 rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling losses first to maximize tax harvesting."
+            elif cash_need > 0:
+                rec_action = f"Sell holdings to fulfill ${cash_need:.2f} cash withdrawal request."
+                rationale = f"Portfolio is {risk_state} but holder requested ${cash_need:.2f} cash. Selling least-tax-cost lots to fulfill while maintaining headroom."
             elif risk_state == "Warning":
-                resulting_ltv = None
                 rec_action = "Monitor portfolio leverage. Optional minor deleveraging."
                 rationale = f"Headroom is low (${headroom:.2f}). No immediate liquidation enforced."
             else:
-                resulting_ltv = None
                 rec_action = "Maintain current positions."
                 rationale = f"Portfolio is Safe with ${headroom:.2f} in headroom."
 
@@ -427,8 +526,19 @@ class ExecutionNode:
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         approved = state.get("approved", False)
         rec = state.get("recommendation")
-        rec_action = rec.recommended_action if isinstance(rec, Recommendation) else (rec.get("recommended_action") if isinstance(rec, dict) else str(rec))
-        proposed = [p.model_dump() for p in rec.proposed_lots] if isinstance(rec, Recommendation) else (rec.get("proposed_lots", []) if isinstance(rec, dict) else [])
+
+        if rec is None:
+            rec_action = "No recommendation"
+            proposed = []
+        elif isinstance(rec, Recommendation):
+            rec_action = rec.recommended_action
+            proposed = [p.model_dump() for p in rec.proposed_lots]
+        elif isinstance(rec, dict):
+            rec_action = rec.get("recommended_action", "No recommendation")
+            proposed = rec.get("proposed_lots", [])
+        else:
+            rec_action = str(rec)
+            proposed = []
 
         if approved:
             self.logger(f"[EXECUTION] APPROVED: Would execute trades for action: {rec_action}")

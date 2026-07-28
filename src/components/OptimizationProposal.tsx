@@ -172,12 +172,12 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
           <div className="flex items-center gap-2 mt-2">
             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
               provider === 'deterministic' ? 'bg-gray-500/10 text-gray-400 border border-gray-500/20' :
-              provider === 'zyloo' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
+              provider === 'groq' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
               provider === 'openrouter' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' :
               'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
             }`}>
               {provider === 'deterministic' ? 'Computed deterministically' :
-               provider === 'zyloo' ? `Explained by ${selectedModel}` :
+               provider === 'groq' ? `Explained by ${selectedModel}` :
                provider === 'openrouter' ? 'Explained by OpenRouter (fallback)' :
                'Explained by Poolside (fallback)'}
             </span>

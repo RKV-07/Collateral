@@ -13,15 +13,15 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Zyloo API helper (OpenAI-compatible — free Gemini/GPT models)
-async function generateViaZyloo(
+// Groq API helper (OpenAI-compatible — fast inference, free tier ~14,400 req/day)
+async function generateViaGroq(
   messages: { role: string; content: string }[],
-  model: string = "gemini-3-flash-preview-free"
+  model: string = "llama-3.3-70b-versatile"
 ): Promise<string> {
-  const apiKey = process.env.ZYLOO_API_KEY;
-  if (!apiKey) throw new Error("No ZYLOO_API_KEY available");
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("No GROQ_API_KEY available");
 
-  const res = await fetch("https://api.zyloo.io/v1/chat/completions", {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -32,7 +32,7 @@ async function generateViaZyloo(
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Zyloo ${res.status}: ${err}`);
+    throw new Error(`Groq ${res.status}: ${err}`);
   }
 
   const data = await res.json();
@@ -109,10 +109,61 @@ async function generateViaPoolside(prompt: string, systemInstruction?: string): 
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    hasZylooKey: !!process.env.ZYLOO_API_KEY,
+    hasGroqKey: !!process.env.GROQ_API_KEY,
     hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
     hasPoolsideKey: !!process.env.POOLSIDE_API_KEY,
   });
+});
+
+// API: Fetch live market prices via yfinance (Python subprocess)
+app.post("/api/portfolio/prices", async (req, res) => {
+  try {
+    const { symbols } = req.body as { symbols: string[] };
+    if (!symbols || !Array.isArray(symbols) || symbols.length === 0) {
+      return res.status(400).json({ error: "Missing or empty symbols array." });
+    }
+
+    const uniqueSymbols = [...new Set(symbols.map(s => s.toUpperCase()))];
+    const prices: Record<string, { price: number; source: string }> = {};
+
+    // Try yfinance via Python subprocess
+    try {
+      const { execSync } = await import("child_process");
+      const pyScript = `
+import json, sys
+try:
+    import yfinance as yf
+    symbols = json.loads(sys.argv[1])
+    result = {}
+    for s in symbols:
+        try:
+            t = yf.Ticker(s)
+            info = t.fast_info
+            price = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+            if price and price > 0:
+                result[s] = {"price": float(price), "source": "yfinance"}
+        except Exception:
+            pass
+    print(json.dumps(result))
+except ImportError:
+    print(json.dumps({}))
+`;
+      const pyResult = execSync(
+        `python3 -c '${pyScript}' '${JSON.stringify(uniqueSymbols)}'`,
+        { timeout: 15000, encoding: "utf-8" }
+      ).trim();
+
+      const yfPrices = JSON.parse(pyResult);
+      Object.assign(prices, yfPrices);
+    } catch (e: any) {
+      console.warn("yfinance subprocess failed:", e.message?.slice(0, 100));
+    }
+
+    res.json({ prices, count: Object.keys(prices).length });
+  } catch (err: any) {
+    console.error("Price fetch error:", err);
+    res.status(500).json({ error: err.message || "Internal server error" });
+  }
 });
 
 // API: Analyze Portfolio and generate AI Rationale
@@ -134,10 +185,10 @@ app.post("/api/portfolio/analyze", async (req, res) => {
 
     let aiExplanation = "";
     let providerUsed = "deterministic";
-    const selectedModel = model || "gemini-3-flash-preview-free";
+    const selectedModel = model || "llama-3.3-70b-versatile";
 
-    // Generate smart rationale via Zyloo if key is present
-    if (process.env.ZYLOO_API_KEY) {
+    // Generate smart rationale via Groq if key is present
+    if (process.env.GROQ_API_KEY) {
       try {
         const rationaleSystem = `You are the Liquidity & Tax Optimizer Agent (using model: ${selectedModel}). Be highly precise, objective, professional, and non-expert friendly. Do not use financial jargon without explaining it.
 
@@ -166,18 +217,18 @@ Optimizer Decisions & Deterministic Results:
 
 Generate a highly polished, short plain-English explanation (approx 2-3 paragraphs) explaining the action plan and why we chose these specific lots. Let the user know they can click 'Approve & Execute' in the UI to proceed.`;
 
-        aiExplanation = await generateViaZyloo([
+        aiExplanation = await generateViaGroq([
           { role: "system", content: rationaleSystem },
           { role: "user", content: rationalePrompt },
         ], selectedModel);
-        providerUsed = "zyloo";
-        console.log("Zyloo rationale generation succeeded");
-      } catch (zylooError: any) {
-        console.error("Zyloo rationale generation failed, trying OpenRouter:", zylooError.message);
+        providerUsed = "groq";
+        console.log("Groq rationale generation succeeded");
+      } catch (groqError: any) {
+        console.error("Groq rationale generation failed, trying OpenRouter:", groqError.message);
       }
     }
 
-    // Fallback: OpenRouter if Zyloo failed or unavailable
+    // Fallback: OpenRouter if Groq failed or unavailable
     if (!aiExplanation && process.env.OPENROUTER_API_KEY) {
       try {
         aiExplanation = await generateViaOpenRouter(
@@ -295,7 +346,7 @@ app.post("/api/portfolio/chat", async (req, res) => {
     }
 
     const deterministicResult = calculateOptimizer(currentSnapshot, cashNeed, marketEvent);
-    const selectedModel = model || "gemini-3-flash-preview-free";
+    const selectedModel = model || "gemini-3-flash-preview";
 
     const systemInstruction = `You are the Liquidity & Tax Optimizer Agent (running model: ${selectedModel}) for a portfolio-collateral monitoring product.
 You watch the user's investment account, track their borrowing capacity against a maintenance LTV limit, and propose the single lowest-tax-cost way to free up funds.
@@ -323,21 +374,21 @@ Adhere to the following rules in every chat message:
 
     let responseText = "";
 
-    // Try Zyloo first
-    if (process.env.ZYLOO_API_KEY) {
+    // Try Groq first
+    if (process.env.GROQ_API_KEY) {
       try {
         const messages = [
           { role: "system", content: systemInstruction },
           ...chatHistory.map((m) => ({ role: m.role === "model" ? "assistant" : m.role, content: m.text })),
         ];
-        responseText = await generateViaZyloo(messages, selectedModel);
-        console.log("Zyloo chat succeeded");
-      } catch (zylooError: any) {
-        console.error("Zyloo chat failed, trying OpenRouter:", zylooError.message);
+        responseText = await generateViaGroq(messages, selectedModel);
+        console.log("Groq chat succeeded");
+      } catch (groqError: any) {
+        console.error("Groq chat failed, trying OpenRouter:", groqError.message);
       }
     }
 
-    // Fallback: OpenRouter if Zyloo failed or unavailable
+    // Fallback: OpenRouter if Groq failed or unavailable
     if (!responseText && process.env.OPENROUTER_API_KEY) {
       try {
         const userMessage = chatHistory.map((m) => `${m.role}: ${m.text}`).join("\n");

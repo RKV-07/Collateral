@@ -23,11 +23,10 @@ import {
 } from "lucide-react";
 
 const AVAILABLE_MODELS = [
-  { id: "gemini-2.5-flash-free", name: "Gemini 2.5 Flash", badge: "Recommended", desc: "Fastest response with top reasoning quality" },
-  { id: "gemini-3-pro-preview-free", name: "Gemini 3 Pro", badge: "Deep Reasoning", desc: "Maximum analytical depth for complex tax strategies" },
-  { id: "gemini-3-flash-preview-free", name: "Gemini 3 Flash", badge: "Low Latency", desc: "Next-gen low-latency model for instant chat" },
-  { id: "gpt-4.1-free", name: "GPT-4.1", badge: "OpenAI", desc: "OpenAI flagship model for general reasoning" },
-  { id: "gpt-4o-free", name: "GPT-4o", badge: "Multimodal", desc: "Fast multimodal model for quick analysis" },
+  { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B", badge: "Recommended", desc: "Best for structured output and function calling" },
+  { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B", badge: "Fastest", desc: "Ultra-low latency for quick responses" },
+  { id: "mixtral-8x7b-32768", name: "Mixtral 8x7B", badge: "Long Context", desc: "32K context for complex multi-turn conversations" },
+  { id: "gemma2-9b-it", name: "Gemma 2 9B", badge: "Compact", desc: "Lightweight and efficient for simple tasks" },
 ];
 
 export default function App() {
@@ -35,7 +34,7 @@ export default function App() {
   const [selectedPreset, setSelectedPreset] = useState<string>("breached");
   
   // Model selection
-  const [selectedModel, setSelectedModel] = useState<string>("gemini-3-flash-preview-free");
+  const [selectedModel, setSelectedModel] = useState<string>("llama-3.3-70b-versatile");
 
   // Custom portfolio states
   const [cash, setCash] = useState<number>(0);
