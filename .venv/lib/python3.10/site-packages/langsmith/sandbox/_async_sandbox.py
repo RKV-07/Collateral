@@ -12,7 +12,6 @@ import httpx
 from langsmith.sandbox._exceptions import (
     DataplaneNotConfiguredError,
     ResourceNotFoundError,
-    SandboxConnectionError,
 )
 from langsmith.sandbox._helpers import handle_sandbox_http_error
 from langsmith.sandbox._models import (
@@ -20,8 +19,10 @@ from langsmith.sandbox._models import (
     AsyncServiceURL,
     ExecutionResult,
     Snapshot,
+    _StreamEndedBeforeStarted,
 )
 from langsmith.sandbox._tunnel import AsyncTunnel
+from langsmith.sandbox._ws_execute import WEBSOCKETS_AVAILABLE
 
 if TYPE_CHECKING:
     from langsmith.sandbox._async_client import AsyncSandboxClient
@@ -335,9 +336,9 @@ class AsyncSandbox:
                 headers=headers,
             )
 
-        # Catch broad exceptions so that unexpected WS failures (e.g. version
-        # incompatibilities) don't break users who don't need WS features.
-        try:
+        # Default (wait=True, no callbacks): use WebSocket when the client
+        # library is available, otherwise the blocking HTTP endpoint.
+        if WEBSOCKETS_AVAILABLE:
             return await self._run_ws(
                 command,
                 timeout=timeout,
@@ -353,15 +354,14 @@ class AsyncSandbox:
                 pty=pty,
                 headers=headers,
             )
-        except (SandboxConnectionError, ImportError, OSError, TypeError):
-            return await self._run_http(
-                command,
-                timeout=timeout,
-                env=env,
-                cwd=cwd,
-                shell=shell,
-                headers=headers,
-            )
+        return await self._run_http(
+            command,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+            shell=shell,
+            headers=headers,
+        )
 
     async def _run_ws(
         self,
@@ -381,12 +381,22 @@ class AsyncSandbox:
         headers: RequestHeaders = None,
     ) -> Union[ExecutionResult, AsyncCommandHandle]:
         """Execute via WebSocket /execute/ws."""
+        import asyncio
+
         from langsmith.sandbox._ws_execute import run_ws_stream_async
+        from langsmith.uuid import uuid7
 
         dataplane_url = self._require_dataplane_url()
         api_key = self._client._api_key
 
+        # A client-supplied command_id makes execute idempotent: the daemon does
+        # get-or-create keyed on it, so if the tunnel closes before "started" we
+        # can re-issue the same id and reattach to the existing command instead
+        # of spawning a second one.
+        command_id = uuid7().hex
+
         ws_kwargs: dict[str, Any] = {
+            "command_id": command_id,
             "timeout": timeout,
             "env": env,
             "cwd": cwd,
@@ -400,21 +410,35 @@ class AsyncSandbox:
         if merged:
             ws_kwargs["headers"] = merged
 
-        msg_stream, control = await run_ws_stream_async(
-            dataplane_url,
-            api_key,
-            command,
-            **ws_kwargs,
-        )
-
-        handle = AsyncCommandHandle(
-            msg_stream,
-            control,
-            self,
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
-        )
-        await handle._ensure_started()
+        attempt = 0
+        while True:
+            msg_stream, control = await run_ws_stream_async(
+                dataplane_url,
+                api_key,
+                command,
+                **ws_kwargs,
+            )
+            handle = AsyncCommandHandle(
+                msg_stream,
+                control,
+                self,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+            )
+            try:
+                await handle._ensure_started()
+                break
+            except _StreamEndedBeforeStarted:
+                # Idempotent re-issue (same command_id) after an early close.
+                attempt += 1
+                if attempt > AsyncCommandHandle.MAX_AUTO_RECONNECTS:
+                    raise
+                await asyncio.sleep(
+                    min(
+                        AsyncCommandHandle._BACKOFF_BASE * (2 ** (attempt - 1)),
+                        AsyncCommandHandle._BACKOFF_MAX,
+                    )
+                )
 
         if not wait:
             return handle
@@ -728,8 +752,9 @@ class AsyncSandbox:
             SandboxClientError: For other errors.
         """
         await self._client.stop_sandbox(self.name, headers=headers)
+        # dataplane_url stays set: it is stable across stop/start and a request
+        # on it resumes the sandbox.
         self.status = "stopped"
-        self.dataplane_url = None
 
     async def delete(self, *, headers: RequestHeaders = None) -> None:
         """Delete this sandbox.
