@@ -6,12 +6,16 @@ A full-stack AI agent that monitors portfolio loan-to-value ratios, proposes tax
 
 - **Real-time market data** — yfinance integration fetches live prices for all holdings (falls back to static fixtures)
 - **Tax-efficient lot optimization** — Sells biggest losses first to harvest tax deductions, with wash-sale detection (IRC §1091)
-- **Short-term vs long-term gains** — Holding period classification per lot; prefers selling short-term losses (higher tax offset against ordinary income)
+- **Short-term vs long-term gains** — Holding period classification per lot; prefers selling short-term losses (higher tax offset against ordinary income). Deterministic sort, not LLM-dependent.
+- **Cost basis method selection** — FIFO, LIFO, HIFO, Tax-Loss Harvest (default), Specific. `Account.cost_basis_method` field.
 - **Sector concentration analysis** — GICS-like sector mapping with configurable threshold (default 40%); warns when any sector exceeds it
 - **Conditional graph branching** — Safe portfolios with no cash need skip the tax optimizer, LLM, and human approval entirely (saves LLM tokens)
+- **Circuit breaker** — Skips LLM providers after 3 consecutive failures for 60s, auto-retries. Prevents hammering dead providers.
+- **Disk cache** — Caches LLM responses for 24h (SHA-256 key). Avoids burning quota on identical prompts.
+- **Persistent audit log** — Append-only SQLite trail (`collateral_audit.db`) for every pipeline run. Compliance-ready.
 - **Multi-provider LLM fallback** — Groq → Poolside → OpenRouter → deterministic (never fails)
 - **MCP tools** — Call `check_ltv` or `optimize_sale` directly from Claude Desktop / Claude Code
-- **Slack alerts** — Proactive webhook notifications on High Risk / margin call detection (fires immediately, before human approval)
+- **Slack alerts** — Proactive webhook notifications on High Risk / margin call detection with cooldown rate-limiting (fires immediately, before human approval)
 - **Export audit trail** — Download full decision log as JSON for compliance / record-keeping
 - **Human-in-the-loop** — Agent proposes, human approves. No automated trades without consent.
 
@@ -27,12 +31,12 @@ Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes 
 
 | # | Node | Role |
 |---|---|---|
-| 1 | `IngestPortfolioNode` | Validates raw JSON into Pydantic `Account` model. Fetches live prices via yfinance. Malformed fixtures fail loudly here. |
-| 2 | `LTVMonitorNode` | Computes `collateral_value`, `current_ltv`, `headroom`, `risk_state`. Sends Slack alert immediately on High Risk. Deterministic math. |
-| 3 | `TaxOptimizerNode` | Ranks lots (losses first), detects wash sales (same-symbol-within-30-days), computes holding period (`is_short_term`/`days_held`), analyzes sector concentration, produces `ranked_lots`. |
-| 4 | `ReasoningAgentNode` | **Only LLM node.** Synthesizes risk/headroom/lots/holding-period/concentration into a structured `Recommendation`. 3-provider fallback chain. |
+| 1 | `IngestPortfolioNode` | Validates raw JSON into Pydantic `Account` model. Fetches live prices via yfinance. Computes holding periods (`days_held`, `is_short_term`) per lot. No-ops if prior state exists. |
+| 2 | `LTVMonitorNode` | Computes `collateral_value`, `current_ltv`, `headroom`, `risk_state`. Sends Slack alert with cooldown rate-limiting on High Risk / margin calls. `notify=False` for read-only contexts. No-ops if prior state exists. |
+| 3 | `TaxOptimizerNode` | Ranks lots by chosen cost basis method (FIFO/LIFO/HIFO/TLH/Specific). Detects wash sales (same-symbol-within-30-days), maps sectors, computes concentration. Sort is short-term-aware: losses before gains, short-term before long-term. |
+| 4 | `ReasoningAgentNode` | **Only LLM node.** Synthesizes risk/headroom/lots/holding-period/concentration into a structured `Recommendation`. 3-provider fallback chain with circuit breaker + disk cache. |
 | 5 | `HumanApprovalNode` | Pauses via `interrupt()` for human review. On resume, sets `approved`. |
-| 6 | `ExecutionNode` | Logs the final decision (dry-run; no live trades). |
+| 6 | `ExecutionNode` | Writes audit log to SQLite (`collateral_audit.db`). Logs the final decision (dry-run; no live trades). |
 | — | `SafeSkipNode` | Branch node — generates a benign `Recommendation` and skips tax/LLM/approval when portfolio is Safe with no cash need. |
 
 ## LLM Provider Chain
@@ -141,13 +145,13 @@ All keys go in `.env.local` (loaded by both Python and Node entry points).
 
 | File | Purpose |
 |---|---|
-| `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), 7 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (11 rules), `AgentState` (includes `cash_need`, `holding_period_days`, `sector_concentration`, `concentration_warning`) |
-| `agent.py` | LangGraph `StateGraph` builder with conditional edges (`_route_after_ltv`), configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` with `_next_node` graph walker |
-| `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures, asserts correctness |
-| `server.ts` | Express backend — Groq + Poolside + OpenRouter fallback chain, chat + analyze + audit + live-prices endpoints, `/api/health` |
-| `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools for Claude Desktop / Claude Code |
-| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math, sector concentration, holding period classification |
+| `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), `CostBasisMethod` enum, `CircuitBreaker` class, `AuditLogger` class, 8 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (12 rules), `AgentState` (includes `cash_need`, `holding_period_days`, `sector_concentration`, `concentration_warning`, `_provider_used`) |
+| `agent.py` | LangGraph `StateGraph` builder with conditional edges (`_route_after_ltv`), configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` with `_next_node` graph walker + resume logic |
+| `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures with 2s delay, asserts correctness |
+| `server.ts` | Express backend — Groq + Poolside + OpenRouter fallback chain, chat + analyze + audit + live-prices endpoints, `/api/health` (uses `execFileSync` for security) |
+| `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools for Claude Desktop / Claude Code (safe-skip bypass for `optimize_sale`) |
+| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math, sector concentration, short/long-term sort, holding period classification |
 | `src/types.ts` | TypeScript interfaces — `ProposedLot` includes `is_short_term`/`days_held`, `ProposalOutput` includes sector concentration fields |
 | `check_providers.py` | Pre-flight health check — pings all 3 providers + yfinance + Slack |
 | `fixtures/fake_users.json` | 6 synthetic test accounts |
-| `requirements.txt` | Python deps including `langchain-openai`, `yfinance>=1.5.0`, `fastmcp>=3.0.0,<4.0.0` (requires Python 3.10+) |
+| `requirements.txt` | Python deps including `langchain-openai`, `yfinance>=1.5.0`, `diskcache`, `fastmcp>=3.0.0,<4.0.0` (requires Python 3.10+) |

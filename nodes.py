@@ -1,7 +1,12 @@
+import hashlib
 import json
 import logging
 import os
+import sqlite3
+import time
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from typing import TypedDict, List, Dict, Any, Optional, Union
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
@@ -26,6 +31,15 @@ class Lot(BaseModel):
     current_price: float = Field(ge=0)
     acquired_date: str
 
+
+class CostBasisMethod(str, Enum):
+    FIFO = "fifo"             # First In, First Out
+    LIFO = "lifo"             # Last In, First Out
+    HIFO = "hifo"             # Highest Cost First Out
+    TLH = "tax_loss_harvest"  # Biggest loss first (current default)
+    SPECIFIC = "specific"      # User picks lots
+
+
 class Account(BaseModel):
     account_id: UUID = Field(default_factory=uuid4)
     name: str
@@ -33,12 +47,14 @@ class Account(BaseModel):
     max_ltv_limit: float = Field(gt=0, le=1, default=0.50)
     cash: float = Field(ge=0, default=0.0)
     holdings: List[Lot]
+    cost_basis_method: CostBasisMethod = Field(default=CostBasisMethod.TLH)
 
 class LotProposal(BaseModel):
     lot_id: UUID
     quantity: float
     realized_gain_loss: float
     wash_sale_caution: bool = Field(default=False)
+    is_long_term: bool = Field(default=False)
 
 class Recommendation(BaseModel):
     risk_state: str
@@ -62,6 +78,7 @@ class AgentState(TypedDict, total=False):
     recommendation: Recommendation            # set by node 4 (Pydantic model)
     approved: bool                            # set by node 5
     result: Dict[str, Any]                    # set by node 6
+    _provider_used: str                       # which LLM provider succeeded (for audit)
 
 
 class IngestPortfolioNode:
@@ -140,6 +157,7 @@ class IngestPortfolioNode:
                 max_ltv_limit=account_model.max_ltv_limit,
                 cash=account_model.cash,
                 holdings=updated_holdings,
+                cost_basis_method=account_model.cost_basis_method,
             )
 
         return {"account": account_model}
@@ -150,15 +168,26 @@ class LTVMonitorNode:
     Solves: manual LTV tracking.
     Computes collateral_value, current_ltv, headroom, and risk_state.
     Sends Slack webhook immediately when risk_state is "High Risk".
+    Includes cooldown to prevent alert spam on repeated queries.
     Pure deterministic Python math.
     """
-    def __init__(self, slack_webhook_url: str = None):
+    def __init__(self, slack_webhook_url: str = None, notify: bool = True, cooldown_seconds: int = 300):
         self.slack_webhook = slack_webhook_url or os.getenv("SLACK_WEBHOOK_URL")
+        self.notify = notify
+        self.cooldown = cooldown_seconds
+        self._last_alert_time = 0.0
 
     def _send_slack_alert(self, current_ltv: float, headroom: float, risk_state: str) -> None:
-        """Send Slack webhook immediately when High Risk is detected."""
-        if not self.slack_webhook or risk_state != "High Risk":
+        """Send Slack webhook immediately when High Risk is detected.
+        Respects notify flag and cooldown to prevent alert spam.
+        """
+        if not self.notify or not self.slack_webhook or risk_state != "High Risk":
             return
+
+        now = time.time()
+        if now - self._last_alert_time < self.cooldown:
+            return
+        self._last_alert_time = now
 
         message = {
             "text": f"High Risk — Margin Call Risk Detected\n"
@@ -255,6 +284,119 @@ class SafeSkipNode:
         }
 
 
+class CircuitBreaker:
+    """Tracks consecutive failures per LLM provider.
+    Opens the circuit (skips provider) after `failure_threshold` failures,
+    then retries after `recovery_timeout` seconds.
+    """
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 60):
+        self.failures: Dict[str, int] = {}
+        self.last_failure: Dict[str, float] = {}
+        self.threshold = failure_threshold
+        self.timeout = recovery_timeout
+
+    def can_call(self, provider: str) -> bool:
+        if self.failures.get(provider, 0) >= self.threshold:
+            elapsed = time.time() - self.last_failure.get(provider, 0)
+            if elapsed > self.timeout:
+                self.failures[provider] = 0
+                return True
+            return False
+        return True
+
+    def record_failure(self, provider: str) -> None:
+        self.failures[provider] = self.failures.get(provider, 0) + 1
+        self.last_failure[provider] = time.time()
+
+    def record_success(self, provider: str) -> None:
+        self.failures[provider] = 0
+
+
+class AuditLogger:
+    """Append-only SQLite audit trail. Logs every pipeline run for compliance."""
+    def __init__(self, db_path: str = "collateral_audit.db"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_trail (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    account_id TEXT,
+                    risk_state TEXT,
+                    headroom REAL,
+                    current_ltv REAL,
+                    recommended_action TEXT,
+                    proposed_lots_count INTEGER,
+                    approved INTEGER,
+                    result_status TEXT,
+                    provider TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_account_time
+                ON audit_trail(account_id, timestamp)
+            """)
+
+    def log(self, state: Dict[str, Any]) -> None:
+        rec = state.get("account")
+        account_id = "unknown"
+        if isinstance(rec, Account):
+            account_id = str(rec.account_id)
+        elif isinstance(rec, dict):
+            account_id = str(rec.get("account_id", "unknown"))
+
+        rec_obj = state.get("recommendation")
+        rec_action = "N/A"
+        proposed_count = 0
+        if isinstance(rec_obj, Recommendation):
+            rec_action = rec_obj.recommended_action
+            proposed_count = len(rec_obj.proposed_lots)
+        elif isinstance(rec_obj, dict):
+            rec_action = rec_obj.get("recommended_action", "N/A")
+            proposed_count = len(rec_obj.get("proposed_lots", []))
+
+        result_obj = state.get("result", {})
+        result_status = result_obj.get("status", "unknown") if isinstance(result_obj, dict) else "unknown"
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO audit_trail
+                    (timestamp, account_id, risk_state, headroom, current_ltv,
+                     recommended_action, proposed_lots_count, approved, result_status, provider)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    datetime.utcnow().isoformat(),
+                    account_id,
+                    state.get("risk_state", "Unknown"),
+                    state.get("headroom", 0.0),
+                    state.get("current_ltv", 0.0),
+                    rec_action,
+                    proposed_count,
+                    1 if state.get("approved") else 0,
+                    result_status,
+                    state.get("_provider_used", "deterministic"),
+                ))
+        except Exception as e:
+            logger.error("[AuditLogger] Failed to write audit log: %s", str(e))
+
+    def query(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most recent `limit` audit entries."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM audit_trail ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("[AuditLogger] Query failed: %s", str(e))
+            return []
+
+
 # Sector mapping for concentration analysis (simplified GICS-like)
 _SECTOR_MAP = {
     "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology", "GOOG": "Technology",
@@ -283,9 +425,12 @@ _SECTOR_MAP = {
 
 def _day_difference(date_str1: str, date_str2: str) -> int:
     """Absolute day difference between two ISO date strings."""
-    d1 = datetime.fromisoformat(date_str1)
-    d2 = datetime.fromisoformat(date_str2)
-    return abs((d1 - d2).days)
+    try:
+        d1 = datetime.fromisoformat(date_str1)
+        d2 = datetime.fromisoformat(date_str2)
+        return abs((d1 - d2).days)
+    except (ValueError, TypeError):
+        return 0
 
 
 class TaxOptimizerNode:
@@ -303,9 +448,11 @@ class TaxOptimizerNode:
         if isinstance(account, Account):
             holdings = account.holdings
             cash = account.cash
+            cost_basis_method = account.cost_basis_method
         else:
             holdings = account.get("holdings", []) if account else []
             cash = float(account.get("cash", 0.0)) if account else 0.0
+            cost_basis_method = account.get("cost_basis_method", CostBasisMethod.TLH) if account else CostBasisMethod.TLH
 
         ranked = []
         holding_period_entries = []
@@ -378,17 +525,30 @@ class TaxOptimizerNode:
         }
 
         concentration_warning = None
-        for sector, pct in sector_concentration.items():
-            if pct > self.concentration_threshold:
+        if sector_concentration:
+            dominant_sector, dominant_pct = max(sector_concentration.items(), key=lambda x: x[1])
+            if dominant_pct > self.concentration_threshold:
                 concentration_warning = (
-                    f"Sector '{sector}' represents {pct:.0%} of portfolio "
+                    f"Sector '{dominant_sector}' represents {dominant_pct:.0%} of portfolio "
                     f"(threshold: {self.concentration_threshold:.0%}). "
                     f"Consider diversifying to reduce concentration risk."
                 )
-                break
 
-        # Sort ascending by unrealized gain/loss (largest loss first)
-        ranked.sort(key=lambda x: x["unrealized_gain_loss"])
+        # Sort based on cost_basis_method
+        if cost_basis_method == CostBasisMethod.FIFO:
+            ranked.sort(key=lambda x: x.get("acquired_date", ""))
+        elif cost_basis_method == CostBasisMethod.LIFO:
+            ranked.sort(key=lambda x: x.get("acquired_date", ""), reverse=True)
+        elif cost_basis_method == CostBasisMethod.HIFO:
+            ranked.sort(key=lambda x: x.get("cost_basis", 0), reverse=True)
+        elif cost_basis_method == CostBasisMethod.TLH:
+            # Losses before gains, short-term before long-term, biggest loss first
+            ranked.sort(key=lambda x: (
+                x["unrealized_gain_loss"] >= 0,
+                not x.get("is_short_term", False),
+                x["unrealized_gain_loss"],
+            ))
+        # SPECIFIC: leave unsorted (user picks)
 
         return {
             "ranked_lots": ranked,
@@ -413,7 +573,8 @@ Hard rules:
 8. If asked to explain resulting LTV after a hypothetical sale, do not compute new LTV values yourself — collateral value decreases by the amount sold (shrinking-collateral feedback loop), which is easy to get wrong. Only speak in terms of the given risk_state/headroom, or explicitly state that a precise pro-forma figure requires re-running the optimizer.
 9. When only one lot of a symbol currently exists, still note that a wash-sale risk could arise if the user repurchases the same or a substantially identical security within 30 days after this sale — that risk cannot be evaluated from current data alone.
 10. When proposing lot sales, prefer selling short-term loss lots over long-term loss lots (short-term losses offset ordinary income at higher rates). Note holding period in your rationale when relevant.
-11. If sector_concentration_warning is provided, acknowledge it in your rationale and note that diversification may be advisable.
+11. If concentration_warning is provided (not None), acknowledge it in your rationale and note that diversification may be advisable.
+12. Ranked lots are pre-sorted by the account's cost_basis_method. Do not re-sort them. If the method is "fifo", lots are oldest-first; "lifo" newest-first; "hifo" highest-cost-first; "tax_loss_harvest" biggest-loss-first.
 """
 
 
@@ -422,6 +583,8 @@ class ReasoningAgentNode:
     Solves: synthesizes risk_state, headroom, and ranked_lots into a recommendation.
     Uses init_chat_model and with_structured_output(Recommendation).
     This is the ONLY node allowed to invoke an LLM.
+    Includes circuit breaker (skips provider after 3 failures for 60s) and
+    file-based disk cache to avoid burning quota on identical prompts.
     """
     def __init__(self, model_name: str = "llama-3.3-70b-versatile", temperature: float = 0.1):
         self.model_name = model_name
@@ -432,6 +595,15 @@ class ReasoningAgentNode:
         self.fallback_structured_llm = None
         self.poolside_llm = None
         self.poolside_structured_llm = None
+        self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+
+        # File-based disk cache (optional — silently disabled if diskcache not installed)
+        self._cache = None
+        try:
+            from diskcache import Cache
+            self._cache = Cache(".llm_cache")
+        except ImportError:
+            pass
 
         from langchain.chat_models import init_chat_model
 
@@ -525,12 +697,29 @@ class ReasoningAgentNode:
 
         recommendation = None
 
+        # Check disk cache first (skip cache for cash_need queries — they vary)
+        cache_key = None
+        if self._cache and cash_need == 0.0:
+            cache_key = hashlib.sha256(
+                json.dumps(messages, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            cached = self._cache.get(cache_key)
+            if cached:
+                try:
+                    recommendation = Recommendation(**cached)
+                    logger.info("[ReasoningAgentNode] Disk cache hit")
+                except Exception:
+                    pass  # corrupted cache entry — fall through to LLM
+
         for label, structured_llm in [
             ("Groq", self.structured_llm),
             ("Poolside", self.poolside_structured_llm),
             ("OpenRouter", self.fallback_structured_llm),
         ]:
             if recommendation is not None or structured_llm is None:
+                continue
+            if not self.circuit_breaker.can_call(label):
+                logger.warning("[ReasoningAgentNode] %s circuit breaker open — skipping", label)
                 continue
             try:
                 result = structured_llm.invoke(messages)
@@ -541,8 +730,19 @@ class ReasoningAgentNode:
                     logger.error("[ReasoningAgentNode] %s returned unknown lot_id(s) — discarding", label)
                     continue
                 recommendation = result
+                self.circuit_breaker.record_success(label)
                 logger.info("[ReasoningAgentNode] %s produced valid recommendation", label)
+                # Populate is_long_term on each proposed lot
+                lot_term_map = {str(lp.get("lot_id", "")): not lp.get("is_short_term", True)
+                                for lp in state.get("holding_period_days", [])}
+                for p in recommendation.proposed_lots:
+                    if not p.is_long_term:
+                        p.is_long_term = lot_term_map.get(str(p.lot_id), False)
+                # Cache the result
+                if self._cache and cache_key and cash_need == 0.0:
+                    self._cache.set(cache_key, recommendation.model_dump(mode="json"), expire=86400)
             except Exception as e:
+                self.circuit_breaker.record_failure(label)
                 logger.warning("[ReasoningAgentNode] %s invoke failed: %s", label, str(e))
 
         # Fallback structured calculation if LLM call is unavailable or fails
@@ -569,7 +769,8 @@ class ReasoningAgentNode:
                             lot_id=str(lot["lot_id"]),
                             quantity=round(sell_qty, 4),
                             realized_gain_loss=round(realized_gl, 2),
-                            wash_sale_caution=lot.get("wash_sale_caution", False)
+                            wash_sale_caution=lot.get("wash_sale_caution", False),
+                            is_long_term=not lot.get("is_short_term", True),
                         )
                     )
                     accumulated += sell_qty * lot["current_price"]
@@ -601,6 +802,10 @@ class ReasoningAgentNode:
             else:
                 rec_action = "Maintain current positions."
                 rationale = f"Portfolio is Safe with ${headroom:.2f} in headroom."
+
+            # Append concentration warning if present
+            if concentration_warning:
+                rationale += f" Note: {concentration_warning}"
 
             recommendation = Recommendation(
                 risk_state=risk_state,
@@ -643,9 +848,11 @@ class ExecutionNode:
     """Node 6 — ExecutionNode
     Solves: closing the loop.
     Logs execution intention if approved, or rejection if denied.
+    Writes to SQLite audit trail via AuditLogger.
     """
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, audit_logger: AuditLogger = None):
         self.logger = logger if logger is not None else print
+        self.audit = audit_logger or AuditLogger()
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         approved = state.get("approved", False)
@@ -678,5 +885,8 @@ class ExecutionNode:
                 "status": "rejected",
                 "message": "Execution cancelled by human supervisor."
             }
+
+        # Write to persistent audit trail
+        self.audit.log(state)
 
         return {"result": result}

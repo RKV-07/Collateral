@@ -124,11 +124,19 @@ app.post("/api/portfolio/prices", async (req, res) => {
     }
 
     const uniqueSymbols = [...new Set(symbols.map(s => s.toUpperCase()))];
+
+    // Defense-in-depth: validate symbol format
+    const symbolRegex = /^[A-Z0-9.\-]{1,10}$/;
+    const validSymbols = uniqueSymbols.filter(s => symbolRegex.test(s));
+    if (validSymbols.length === 0) {
+      return res.status(400).json({ error: "No valid symbols provided." });
+    }
+
     const prices: Record<string, { price: number; source: string }> = {};
 
-    // Try yfinance via Python subprocess
+    // Try yfinance via Python subprocess (execFileSync — no shell, no injection)
     try {
-      const { execSync } = await import("child_process");
+      const { execFileSync } = await import("child_process");
       const pyScript = `
 import json, sys
 try:
@@ -148,8 +156,9 @@ try:
 except ImportError:
     print(json.dumps({}))
 `;
-      const pyResult = execSync(
-        `python3 -c '${pyScript}' '${JSON.stringify(uniqueSymbols)}'`,
+      const pyResult = execFileSync(
+        "python3",
+        ["-c", pyScript, JSON.stringify(validSymbols)],
         { timeout: 15000, encoding: "utf-8" }
       ).trim();
 

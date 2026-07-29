@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from nodes import (
     Account, IngestPortfolioNode, LTVMonitorNode,
     TaxOptimizerNode, ReasoningAgentNode, Recommendation,
+    SafeSkipNode,
 )
 
 try:
@@ -34,10 +35,12 @@ except ImportError:
 app = FastMCP("collateral-optimizer")
 
 # Build node instances once at module level — reuse across tool calls
+# notify=False: read-only MCP queries should not fire Slack alerts
 _ingest = IngestPortfolioNode(use_live_prices=False)
-_ltv_node = LTVMonitorNode()
+_ltv_node = LTVMonitorNode(notify=False)
 _tax_node = TaxOptimizerNode()
 _reasoning = ReasoningAgentNode()
+_safe_skip = SafeSkipNode()
 
 
 @app.tool()
@@ -86,9 +89,12 @@ def optimize_sale(account_json: str, cash_need: float = 0.0) -> str:
         state.update(_ltv_node(state))
         state.update(_tax_node(state))
 
-        # Thread cash_need into state so ReasoningAgentNode can use it
-        state["cash_need"] = cash_need
-        state.update(_reasoning(state))
+        # Skip LLM if Safe + no cash_need (saves quota on interactive queries)
+        if state.get("risk_state") == "Safe" and cash_need <= 0:
+            state.update(_safe_skip(state))
+        else:
+            state["cash_need"] = cash_need
+            state.update(_reasoning(state))
 
         rec = state.get("recommendation")
         if isinstance(rec, Recommendation):

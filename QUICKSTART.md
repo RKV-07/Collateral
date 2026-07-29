@@ -98,10 +98,10 @@ python check_providers.py
 
 | File | What It Does |
 |---|---|
-| `nodes.py` | All Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), 7 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (11 rules), `AgentState` |
-| `agent.py` | Builds the LangGraph `StateGraph` with conditional edges, configurable checkpointer, fallback `CompiledGraph` with graph walker |
-| `run_fixtures.py` | Test runner — iterates 6 fixtures, asserts correctness |
-| `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools |
+| `nodes.py` | All Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), `CostBasisMethod` enum, `CircuitBreaker` class, `AuditLogger` class, 8 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (12 rules), `AgentState` |
+| `agent.py` | Builds the LangGraph `StateGraph` with conditional edges (`_route_after_ltv`), configurable checkpointer, fallback `CompiledGraph` with graph walker + resume logic |
+| `run_fixtures.py` | Test runner — iterates 6 fixtures with 2s delay, asserts correctness |
+| `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools (safe-skip bypass) |
 | `check_providers.py` | Pre-flight health check — pings all providers + yfinance + Slack |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Template for API keys |
@@ -110,7 +110,7 @@ python check_providers.py
 
 | File | What It Does |
 |---|---|
-| `server.ts` | Express backend — Groq/Poolside/OpenRouter fallback chain, chat, analyze, audit, live-prices endpoints, `/api/health` |
+| `server.ts` | Express backend — Groq/Poolside/OpenRouter fallback chain, chat, analyze, audit, live-prices endpoints, `/api/health` (uses `execFileSync` for security) |
 | `src/App.tsx` | Main React app — model selector, preset configs, audit workflow |
 | `src/components/OptimizationProposal.tsx` | Renders proposals — tax lots, LTV gauge, wash-sale warnings, export audit trail |
 | `src/components/ChatAssistant.tsx` | Chat interface — ask questions about portfolio, uses Groq |
@@ -132,7 +132,7 @@ python check_providers.py
 
 | File | What It Does |
 |---|---|
-| `tests/test_nodes.py` | 66 unit + e2e tests for all Python nodes (including SafeSkipNode, holding period, sector concentration) |
+| `tests/test_nodes.py` | 80 unit + e2e tests for all Python nodes (SafeSkipNode, holding period, sector concentration, circuit breaker, audit logger, cost basis methods, Slack rate-limiting, conditional branching) |
 | `tests/test_mcp.py` | 8 tests for MCP server tools |
 
 ### Docs

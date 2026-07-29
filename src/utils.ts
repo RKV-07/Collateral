@@ -144,8 +144,16 @@ export function calculateOptimizer(
     };
   });
 
-  // Sort: larger losses (most negative) first.
-  lotsWithGainLoss.sort((a, b) => a.unrealized_gain_loss - b.unrealized_gain_loss);
+  // Sort: losses before gains, short-term before long-term, biggest loss first
+  lotsWithGainLoss.sort((a, b) => {
+    const aIsLoss = a.unrealized_gain_loss < 0 ? 0 : 1;
+    const bIsLoss = b.unrealized_gain_loss < 0 ? 0 : 1;
+    if (aIsLoss !== bIsLoss) return aIsLoss - bIsLoss;
+    const aIsShort = a.is_short_term ? 0 : 1;
+    const bIsShort = b.is_short_term ? 0 : 1;
+    if (aIsShort !== bIsShort) return aIsShort - bIsShort;
+    return a.unrealized_gain_loss - b.unrealized_gain_loss;
+  });
 
   // Sector concentration analysis
   const sectorValues: { [sector: string]: number } = {};

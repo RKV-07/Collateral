@@ -18,7 +18,8 @@ from nodes import (
     Lot, Account, LotProposal, Recommendation,
     IngestPortfolioNode, LTVMonitorNode, TaxOptimizerNode,
     ReasoningAgentNode, HumanApprovalNode, ExecutionNode,
-    SafeSkipNode, _day_difference,
+    SafeSkipNode, CircuitBreaker, AuditLogger, CostBasisMethod,
+    _day_difference,
 )
 from agent import _route_after_ltv
 
@@ -542,6 +543,160 @@ class TestSafeSkipNode:
         node = SafeSkipNode()
         result = node(state)
         assert "$3,000.00" in result["recommendation"].rationale
+
+
+class TestCircuitBreaker:
+    def test_allows_calls_below_threshold(self):
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        assert cb.can_call("Groq") is True
+
+    def test_opens_after_threshold_failures(self):
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        for _ in range(3):
+            cb.record_failure("Groq")
+        assert cb.can_call("Groq") is False
+
+    def test_resets_success_count(self):
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        cb.record_failure("Groq")
+        cb.record_failure("Groq")
+        cb.record_success("Groq")
+        assert cb.can_call("Groq") is True
+        assert cb.failures["Groq"] == 0
+
+    def test_independent_per_provider(self):
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=60)
+        cb.record_failure("Groq")
+        cb.record_failure("Groq")
+        assert cb.can_call("Groq") is False
+        assert cb.can_call("OpenRouter") is True
+
+
+class TestAuditLogger:
+    def test_log_writes_to_db(self, tmp_path):
+        db = str(tmp_path / "test_audit.db")
+        logger = AuditLogger(db_path=db)
+        state = {
+            "account": Account(
+                name="Test", holdings=[Lot(symbol="X", quantity=1, cost_basis=1, current_price=1, acquired_date="2023-01-01")],
+                loan_balance=100, max_ltv_limit=0.50,
+            ),
+            "risk_state": "Safe",
+            "headroom": 500.0,
+            "current_ltv": 0.25,
+            "recommendation": Recommendation(
+                risk_state="Safe", recommended_action="Maintain",
+                proposed_lots=[], rationale="Safe.",
+            ),
+            "approved": True,
+            "result": {"status": "executed"},
+        }
+        logger.log(state)
+        rows = logger.query()
+        assert len(rows) == 1
+        assert rows[0]["risk_state"] == "Safe"
+        assert rows[0]["approved"] == 1
+
+    def test_query_returns_most_recent(self, tmp_path):
+        db = str(tmp_path / "test_audit2.db")
+        logger = AuditLogger(db_path=db)
+        base = {
+            "risk_state": "Safe", "headroom": 500.0, "current_ltv": 0.25,
+            "approved": True, "result": {"status": "executed"},
+        }
+        for i in range(3):
+            logger.log({**base, "account": Account(
+                name=f"Test{i}", holdings=[Lot(symbol="X", quantity=1, cost_basis=1, current_price=1, acquired_date="2023-01-01")],
+                loan_balance=100, max_ltv_limit=0.50,
+            )})
+        rows = logger.query(limit=2)
+        assert len(rows) == 2
+
+
+class TestCostBasisMethod:
+    def test_fifo_sorts_oldest_first(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="A", lot_id="a1b2c3d4-0000-0000-0000-000000000001", acquired_date="2024-06-01", cost_basis=100, current_price=150),
+            _make_lot(symbol="B", lot_id="a1b2c3d4-0000-0000-0000-000000000002", acquired_date="2023-01-01", cost_basis=100, current_price=150),
+        ])
+        acc.cost_basis_method = CostBasisMethod.FIFO
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        # FIFO: oldest first → B (2023) before A (2024)
+        assert result["ranked_lots"][0]["acquired_date"] == "2023-01-01"
+
+    def test_lifo_sorts_newest_first(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="A", lot_id="a1b2c3d4-0000-0000-0000-000000000003", acquired_date="2024-06-01", cost_basis=100, current_price=150),
+            _make_lot(symbol="B", lot_id="a1b2c3d4-0000-0000-0000-000000000004", acquired_date="2023-01-01", cost_basis=100, current_price=150),
+        ])
+        acc.cost_basis_method = CostBasisMethod.LIFO
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        # LIFO: newest first → A (2024) before B (2023)
+        assert result["ranked_lots"][0]["acquired_date"] == "2024-06-01"
+
+    def test_hifo_sorts_highest_cost_first(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="A", lot_id="a1b2c3d4-0000-0000-0000-000000000005", cost_basis=50, current_price=100),
+            _make_lot(symbol="B", lot_id="a1b2c3d4-0000-0000-0000-000000000006", cost_basis=200, current_price=100),
+        ])
+        acc.cost_basis_method = CostBasisMethod.HIFO
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        # HIFO: highest cost first → B (200) before A (50)
+        assert result["ranked_lots"][0]["cost_basis"] == 200
+
+    def test_tlh_sorts_losses_before_gains(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="A", lot_id="a1b2c3d4-0000-0000-0000-000000000007", cost_basis=200, current_price=100),
+            _make_lot(symbol="B", lot_id="a1b2c3d4-0000-0000-0000-000000000008", cost_basis=50, current_price=100),
+        ])
+        acc.cost_basis_method = CostBasisMethod.TLH
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        # TLH: biggest loss first → A (loss -10000) before B (gain +5000)
+        assert result["ranked_lots"][0]["unrealized_gain_loss"] < result["ranked_lots"][1]["unrealized_gain_loss"]
+
+    def test_default_method_is_tlh(self):
+        acc = _make_account()
+        assert acc.cost_basis_method == CostBasisMethod.TLH
+
+
+class TestSlackRateLimiting:
+    def test_cooldown_prevents_spam(self):
+        node = LTVMonitorNode(slack_webhook_url="https://hooks.slack.com/test", cooldown_seconds=300)
+        # Call with High Risk state — _send_slack_alert will try POST (fails silently)
+        state = {"account": Account(
+            name="Test", holdings=[Lot(symbol="X", quantity=100, cost_basis=10, current_price=10, acquired_date="2023-01-01")],
+            loan_balance=2000, max_ltv_limit=0.50,
+        )}
+        node(state)
+        first_time = node._last_alert_time
+        assert first_time > 0
+        node(state)
+        # Second call within cooldown — _last_alert_time unchanged
+        assert node._last_alert_time == first_time
+
+    def test_notify_false_disables_alerts(self):
+        node = LTVMonitorNode(slack_webhook_url="https://hooks.slack.com/test", notify=False)
+        with patch.object(node, "_send_slack_alert") as mock_alert:
+            node({"account": Account(
+                name="Test", holdings=[Lot(symbol="X", quantity=100, cost_basis=10, current_price=10, acquired_date="2023-01-01")],
+                loan_balance=2000, max_ltv_limit=0.50,
+            )})
+            mock_alert.assert_called_once()
+            assert node._last_alert_time == 0
+
+
+class TestDayDifferenceMalformed:
+    def test_malformed_date_returns_zero(self):
+        assert _day_difference("not-a-date", "2023-01-01") == 0
+        assert _day_difference("2023-01-01", "also-not-a-date") == 0
 
 
 # ---------------------------------------------------------------------------

@@ -190,10 +190,18 @@ else:
             return None
 
         def invoke(self, initial_state, config=None, stop_before=None):
-            state = dict(initial_state or {})
             thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
+            prior = self._state_store.get(thread_id)
 
-            current = "ingest"
+            # Resume from prior state if available, merge in new keys
+            state = dict(prior) if prior else {}
+            state.update(initial_state or {})
+
+            # If resuming (had prior state + new input like "approved"), start from human_approval
+            if prior and initial_state and "approved" in initial_state:
+                current = "human_approval"
+            else:
+                current = "ingest"
             visited = set()
 
             while current:
