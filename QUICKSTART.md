@@ -133,7 +133,7 @@ python check_providers.py
 | File | What It Does |
 |---|---|
 | `tests/test_nodes.py` | 80 unit + e2e tests for all Python nodes (SafeSkipNode, holding period, sector concentration, circuit breaker, audit logger, cost basis methods, Slack rate-limiting, conditional branching) |
-| `tests/test_mcp.py` | 8 tests for MCP server tools |
+| `tests/test_mcp.py` | 10 tests for MCP server tools (including safe-skip bypass and cash-need routing) |
 
 ### Docs
 
