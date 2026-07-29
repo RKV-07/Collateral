@@ -1,5 +1,35 @@
 import { AccountSnapshot, ProposalOutput, ProposedLot, MarketEvent, HoldingLot } from "./types";
 
+const SECTOR_MAP: { [symbol: string]: string } = {
+  AAPL: "Technology", MSFT: "Technology", GOOGL: "Technology", GOOG: "Technology",
+  META: "Technology", NVDA: "Technology", AMD: "Technology", INTC: "Technology",
+  CRM: "Technology", ORCL: "Technology", ADBE: "Technology", SNOW: "Technology",
+  PLTR: "Technology", UBER: "Technology", SQ: "Technology", SHOP: "Technology",
+  AMZN: "Consumer Discretionary", TSLA: "Consumer Discretionary",
+  HD: "Consumer Discretionary", NKE: "Consumer Discretionary",
+  MCD: "Consumer Discretionary", SBUX: "Consumer Discretionary",
+  JPM: "Financials", BAC: "Financials", WFC: "Financials", GS: "Financials",
+  MS: "Financials", V: "Financials", MA: "Financials", AXP: "Financials",
+  JNJ: "Healthcare", UNH: "Healthcare", PFE: "Healthcare", ABBV: "Healthcare",
+  MRK: "Healthcare", LLY: "Healthcare", TMO: "Healthcare", ABT: "Healthcare",
+  XOM: "Energy", CVX: "Energy", COP: "Energy", SLB: "Energy", EOG: "Energy",
+  PG: "Consumer Staples", KO: "Consumer Staples", PEP: "Consumer Staples",
+  COST: "Consumer Staples", WMT: "Consumer Staples",
+  NEE: "Utilities", DUK: "Utilities", SO: "Utilities", D: "Utilities",
+  AMT: "Real Estate", PLD: "Real Estate", CCI: "Real Estate", SPG: "Real Estate",
+  CAT: "Industrials", BA: "Industrials", HON: "Industrials", UPS: "Industrials",
+  GE: "Industrials", RTX: "Industrials", LMT: "Industrials",
+  NFLX: "Communication Services", DIS: "Communication Services",
+  CMCSA: "Communication Services", T: "Communication Services",
+  VZ: "Communication Services",
+};
+
+function getDaysHeld(acquiredDate: string): number {
+  const acquired = new Date(acquiredDate);
+  const now = new Date();
+  return Math.ceil((now.getTime() - acquired.getTime()) / (1000 * 60 * 60 * 24));
+}
+
 export function getAdjustedSnapshot(snapshot: AccountSnapshot, event?: MarketEvent): AccountSnapshot {
   if (!event) return snapshot;
 
@@ -98,19 +128,48 @@ export function calculateOptimizer(
   interface LotWithGainLoss extends HoldingLot {
     unrealized_gain_loss: number;
     gain_loss_per_share: number;
+    days_held: number;
+    is_short_term: boolean;
   }
 
   const lotsWithGainLoss: LotWithGainLoss[] = holdings.map((lot) => {
     const unrealized = (lot.current_price - lot.cost_basis) * lot.quantity;
+    const daysHeld = getDaysHeld(lot.acquired_date);
     return {
       ...lot,
       unrealized_gain_loss: parseFloat(unrealized.toFixed(2)),
       gain_loss_per_share: lot.current_price - lot.cost_basis,
+      days_held: daysHeld,
+      is_short_term: daysHeld <= 365,
     };
   });
 
   // Sort: larger losses (most negative) first.
   lotsWithGainLoss.sort((a, b) => a.unrealized_gain_loss - b.unrealized_gain_loss);
+
+  // Sector concentration analysis
+  const sectorValues: { [sector: string]: number } = {};
+  let totalValue = 0;
+  holdings.forEach((lot) => {
+    const value = lot.quantity * lot.current_price;
+    totalValue += value;
+    const sector = SECTOR_MAP[lot.symbol.toUpperCase()] || "Unknown";
+    sectorValues[sector] = (sectorValues[sector] || 0) + value;
+  });
+
+  const sectorConcentration: { [sector: string]: number } = {};
+  for (const [sector, value] of Object.entries(sectorValues)) {
+    sectorConcentration[sector] = totalValue > 0 ? value / totalValue : 0;
+  }
+
+  const concentrationThreshold = 0.40;
+  let concentrationWarning: string | null = null;
+  for (const [sector, pct] of Object.entries(sectorConcentration)) {
+    if (pct > concentrationThreshold) {
+      concentrationWarning = `Sector '${sector}' represents ${(pct * 100).toFixed(0)}% of portfolio (threshold: ${(concentrationThreshold * 100).toFixed(0)}%). Consider diversifying to reduce concentration risk.`;
+      break;
+    }
+  }
 
   // Propose lots to sell
   const proposed_lots_to_sell: ProposedLot[] = [];
@@ -145,6 +204,8 @@ export function calculateOptimizer(
         est_proceeds: parseFloat(lot_value.toFixed(2)),
         realized_gain_loss: lot.unrealized_gain_loss,
         wash_sale_caution,
+        is_short_term: lot.is_short_term,
+        days_held: lot.days_held,
       });
       total_est_proceeds += lot_value;
       total_realized_gain_loss += lot.unrealized_gain_loss;
@@ -163,6 +224,8 @@ export function calculateOptimizer(
         est_proceeds: est_proc,
         realized_gain_loss: realized_gl,
         wash_sale_caution,
+        is_short_term: lot.is_short_term,
+        days_held: lot.days_held,
       });
       total_est_proceeds += est_proc;
       total_realized_gain_loss += realized_gl;
@@ -205,6 +268,19 @@ export function calculateOptimizer(
     rationale = `Your portfolio is in a safe state with a current LTV of ${(current_ltv * 100).toFixed(1)}% and $${headroom.toLocaleString()} in headroom. No immediate liquidations or adjustments are required.`;
   }
 
+  // Short-term vs long-term loss totals
+  let shortTermLossTotal = 0;
+  let longTermLossTotal = 0;
+  proposed_lots_to_sell.forEach((lot) => {
+    if (lot.realized_gain_loss < 0) {
+      if (lot.is_short_term) {
+        shortTermLossTotal += Math.abs(lot.realized_gain_loss);
+      } else {
+        longTermLossTotal += Math.abs(lot.realized_gain_loss);
+      }
+    }
+  });
+
   return {
     risk_state,
     current_ltv,
@@ -213,5 +289,9 @@ export function calculateOptimizer(
     proposed_lots_to_sell,
     resulting_ltv_if_executed,
     rationale,
+    sector_concentration: sectorConcentration,
+    concentration_warning: concentrationWarning,
+    short_term_loss_total: parseFloat(shortTermLossTotal.toFixed(2)),
+    long_term_loss_total: parseFloat(longTermLossTotal.toFixed(2)),
   };
 }

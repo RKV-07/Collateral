@@ -27,6 +27,8 @@ export interface ProposedLot {
   est_proceeds: number;
   realized_gain_loss: number;
   wash_sale_caution: boolean;
+  is_short_term?: boolean;
+  days_held?: number;
 }
 
 export interface ProposalOutput {
@@ -37,6 +39,10 @@ export interface ProposalOutput {
   proposed_lots_to_sell: ProposedLot[];
   resulting_ltv_if_executed: number;
   rationale: string;
+  sector_concentration?: { [sector: string]: number };
+  concentration_warning?: string | null;
+  short_term_loss_total?: number;
+  long_term_loss_total?: number;
 }
 
 export interface ChatMessage {

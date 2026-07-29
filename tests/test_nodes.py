@@ -18,8 +18,9 @@ from nodes import (
     Lot, Account, LotProposal, Recommendation,
     IngestPortfolioNode, LTVMonitorNode, TaxOptimizerNode,
     ReasoningAgentNode, HumanApprovalNode, ExecutionNode,
-    _day_difference,
+    SafeSkipNode, _day_difference,
 )
+from agent import _route_after_ltv
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +358,69 @@ class TestTaxOptimizerNode:
         result = node(state)
         assert result["ranked_lots"] == []
 
+    def test_holding_period_short_term(self):
+        recent = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
+        acc = _make_account(holdings=[
+            _make_lot(symbol="XYZ", lot_id="a1b2c3d4-0000-0000-0000-000000000001", acquired_date=recent),
+        ])
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        lot = result["ranked_lots"][0]
+        assert lot["is_short_term"] is True
+        assert lot["days_held"] <= 101
+        assert len(result["holding_period_days"]) == 1
+        assert result["holding_period_days"][0]["is_short_term"] is True
+
+    def test_holding_period_long_term(self):
+        old = (datetime.now() - timedelta(days=500)).strftime("%Y-%m-%d")
+        acc = _make_account(holdings=[
+            _make_lot(symbol="XYZ", lot_id="a1b2c3d4-0000-0000-0000-000000000002", acquired_date=old),
+        ])
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        lot = result["ranked_lots"][0]
+        assert lot["is_short_term"] is False
+        assert lot["days_held"] > 365
+
+    def test_sector_concentration_warning(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="AAPL", lot_id="a1b2c3d4-0000-0000-0000-000000000003", quantity=100, current_price=200),
+            _make_lot(symbol="MSFT", lot_id="a1b2c3d4-0000-0000-0000-000000000004", quantity=50, current_price=100),
+        ])
+        state = {"account": acc}
+        node = TaxOptimizerNode(concentration_threshold=0.40)
+        result = node(state)
+        # AAPL = 20000, MSFT = 5000, total = 25000
+        # Both in Technology → 100% > 40% threshold
+        assert result["concentration_warning"] is not None
+        assert "Technology" in result["concentration_warning"]
+        assert "100%" in result["concentration_warning"]
+        assert "sector_concentration" in result
+        assert "Technology" in result["sector_concentration"]
+
+    def test_sector_concentration_no_warning_below_threshold(self):
+        acc = _make_account(holdings=[
+            _make_lot(symbol="AAPL", lot_id="a1b2c3d4-0000-0000-0000-000000000005", quantity=10, current_price=100),
+            _make_lot(symbol="JPM", lot_id="a1b2c3d4-0000-0000-0000-000000000006", quantity=10, current_price=100),
+            _make_lot(symbol="JNJ", lot_id="a1b2c3d4-0000-0000-0000-000000000007", quantity=10, current_price=100),
+            _make_lot(symbol="XOM", lot_id="a1b2c3d4-0000-0000-0000-000000000008", quantity=10, current_price=100),
+        ])
+        state = {"account": acc}
+        node = TaxOptimizerNode(concentration_threshold=0.40)
+        result = node(state)
+        # Each sector = 25%, below 40% threshold
+        assert result["concentration_warning"] is None
+
+    def test_sector_concentration_empty_holdings(self):
+        acc = _make_account(holdings=[])
+        state = {"account": acc}
+        node = TaxOptimizerNode()
+        result = node(state)
+        assert result["sector_concentration"] == {}
+        assert result["concentration_warning"] is None
+
 
 # ---------------------------------------------------------------------------
 # ExecutionNode
@@ -450,6 +514,36 @@ class TestExecutionNode:
         assert result["result"]["status"] == "executed"
 
 
+class TestSafeSkipNode:
+    def test_safe_skip_generates_benign_recommendation(self):
+        state = {"headroom": 5000.0, "risk_state": "Safe", "cash_need": 0.0}
+        node = SafeSkipNode()
+        result = node(state)
+        assert isinstance(result["recommendation"], Recommendation)
+        assert result["recommendation"].risk_state == "Safe"
+        assert result["recommendation"].recommended_action == "No action required"
+        assert result["recommendation"].proposed_lots == []
+
+    def test_safe_skip_sets_approved(self):
+        state = {"headroom": 5000.0, "risk_state": "Safe"}
+        node = SafeSkipNode()
+        result = node(state)
+        assert result["approved"] is True
+
+    def test_safe_skip_sets_result_status_skipped(self):
+        state = {"headroom": 5000.0, "risk_state": "Safe"}
+        node = SafeSkipNode()
+        result = node(state)
+        assert result["result"]["status"] == "skipped"
+        assert "tax optimizer and LLM skipped" in result["result"]["message"]
+
+    def test_safe_skip_rationale_mentions_headroom(self):
+        state = {"headroom": 3000.0, "risk_state": "Safe"}
+        node = SafeSkipNode()
+        result = node(state)
+        assert "$3,000.00" in result["recommendation"].rationale
+
+
 # ---------------------------------------------------------------------------
 # HumanApprovalNode
 # ---------------------------------------------------------------------------
@@ -499,6 +593,32 @@ class TestEndToEndPipeline:
         # Simulate human approval
         state["approved"] = approved
         state.update(execution(state))
+
+        return state
+
+    def _run_pipeline_with_skip(self, account_dict, approved=True):
+        """Run pipeline with conditional branching (Safe → skip tax/LLM)."""
+        from agent import _route_after_ltv
+        ingest = IngestPortfolioNode(use_live_prices=False)
+        ltv = LTVMonitorNode()
+        tax = TaxOptimizerNode()
+        reasoning = ReasoningAgentNode()
+        safe_skip = SafeSkipNode()
+        approval = HumanApprovalNode()
+        execution = ExecutionNode()
+
+        state = {"account": account_dict}
+        state.update(ingest(state))
+        state.update(ltv(state))
+
+        route = _route_after_ltv(state)
+        if route == "safe_skip":
+            state.update(safe_skip(state))
+        else:
+            state.update(tax(state))
+            state.update(reasoning(state))
+            state["approved"] = approved
+            state.update(execution(state))
 
         return state
 
@@ -596,3 +716,29 @@ class TestEndToEndPipeline:
             assert "headroom" in state
             assert "result" in state
             assert state["result"]["status"] in ("executed", "rejected")
+
+    def test_safe_portfolio_skips_tax_and_llm(self):
+        """Safe portfolio with no cash_need should skip tax optimizer and LLM."""
+        account = _make_account_dict(loan_balance=1000)
+        state = self._run_pipeline_with_skip(account)
+        assert state["risk_state"] == "Safe"
+        assert state["result"]["status"] == "skipped"
+        assert state["approved"] is True
+
+    def test_warning_portfolio_does_not_skip(self):
+        """Warning portfolio should NOT skip tax optimizer or LLM."""
+        account = _make_account_dict(
+            loan_balance=4000,
+            holdings=[_make_lot(current_price=100)],
+        )
+        state = self._run_pipeline_with_skip(account)
+        assert state["risk_state"] == "Warning"
+        assert state["result"]["status"] in ("executed", "rejected")
+
+    def test_safe_with_cash_need_does_not_skip(self):
+        """Safe portfolio WITH cash_need should NOT skip (needs tax optimization)."""
+        account = _make_account_dict(loan_balance=1000)
+        state = self._run_pipeline_with_skip(account)
+        state["cash_need"] = 5000.0
+        route = _route_after_ltv(state)
+        assert route == "tax_optimizer"

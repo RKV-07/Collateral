@@ -56,6 +56,9 @@ class AgentState(TypedDict, total=False):
     risk_state: str                           # "Safe" | "Warning" | "High Risk" — node 2
     ranked_lots: List[Dict[str, Any]]         # set by node 3
     cash_need: float                          # optional: cash withdrawal request
+    holding_period_days: List[Dict[str, Any]] # set by node 3 (lot_id → days held)
+    sector_concentration: Dict[str, float]    # set by node 3 (sector → % of portfolio)
+    concentration_warning: str                # set by node 3 (warning message if any)
     recommendation: Recommendation            # set by node 4 (Pydantic model)
     approved: bool                            # set by node 5
     result: Dict[str, Any]                    # set by node 6
@@ -222,6 +225,62 @@ class LTVMonitorNode:
         }
 
 
+class SafeSkipNode:
+    """Branch node — reached when risk_state == "Safe" and no cash_need.
+    Generates a benign Recommendation and skips the tax optimizer, LLM, and human approval.
+    Avoids wasting LLM tokens on portfolios that need no action.
+    """
+    def __init__(self):
+        pass
+
+    def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        headroom = state.get("headroom", 0.0)
+        recommendation = Recommendation(
+            risk_state="Safe",
+            recommended_action="No action required",
+            proposed_lots=[],
+            resulting_ltv_if_executed=None,
+            rationale=(
+                f"Portfolio is Safe with ${headroom:,.2f} in headroom. "
+                f"No liquidation or tax optimization needed."
+            ),
+        )
+        return {
+            "recommendation": recommendation,
+            "approved": True,
+            "result": {
+                "status": "skipped",
+                "message": "Portfolio is Safe with no cash need — tax optimizer and LLM skipped.",
+            },
+        }
+
+
+# Sector mapping for concentration analysis (simplified GICS-like)
+_SECTOR_MAP = {
+    "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology", "GOOG": "Technology",
+    "META": "Technology", "NVDA": "Technology", "AMD": "Technology", "INTC": "Technology",
+    "CRM": "Technology", "ORCL": "Technology", "ADBE": "Technology", "SNOW": "Technology",
+    "PLTR": "Technology", "UBER": "Technology", "SQ": "Technology", "SHOP": "Technology",
+    "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+    "HD": "Consumer Discretionary", "NKE": "Consumer Discretionary",
+    "MCD": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
+    "JPM": "Financials", "BAC": "Financials", "WFC": "Financials", "GS": "Financials",
+    "MS": "Financials", "V": "Financials", "MA": "Financials", "AXP": "Financials",
+    "JNJ": "Healthcare", "UNH": "Healthcare", "PFE": "Healthcare", "ABBV": "Healthcare",
+    "MRK": "Healthcare", "LLY": "Healthcare", "TMO": "Healthcare", "ABT": "Healthcare",
+    "XOM": "Energy", "CVX": "Energy", "COP": "Energy", "SLB": "Energy", "EOG": "Energy",
+    "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples",
+    "COST": "Consumer Staples", "WMT": "Consumer Staples",
+    "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities", "D": "Utilities",
+    "AMT": "Real Estate", "PLD": "Real Estate", "CCI": "Real Estate", "SPG": "Real Estate",
+    "CAT": "Industrials", "BA": "Industrials", "HON": "Industrials", "UPS": "Industrials",
+    "GE": "Industrials", "RTX": "Industrials", "LMT": "Industrials",
+    "NFLX": "Communication Services", "DIS": "Communication Services",
+    "CMCSA": "Communication Services", "T": "Communication Services",
+    "VZ": "Communication Services",
+}
+
+
 def _day_difference(date_str1: str, date_str2: str) -> int:
     """Absolute day difference between two ISO date strings."""
     d1 = datetime.fromisoformat(date_str1)
@@ -232,20 +291,25 @@ def _day_difference(date_str1: str, date_str2: str) -> int:
 class TaxOptimizerNode:
     """Node 3 — TaxOptimizerNode
     Solves: tax-inefficient rebalancing.
-    Computes unrealized gain/loss per lot, wash-sale risk, and ranks them (biggest loss first).
+    Computes unrealized gain/loss per lot, wash-sale risk, holding period classification,
+    sector concentration, and ranks them (biggest loss first).
     Pure deterministic Python math — no LLM.
     """
-    def __init__(self):
-        pass
+    def __init__(self, concentration_threshold: float = 0.40):
+        self.concentration_threshold = concentration_threshold
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         account = state.get("account")
         if isinstance(account, Account):
             holdings = account.holdings
+            cash = account.cash
         else:
-            holdings = account.get("holdings", [])
+            holdings = account.get("holdings", []) if account else []
+            cash = float(account.get("cash", 0.0)) if account else 0.0
 
         ranked = []
+        holding_period_entries = []
+        today = datetime.now().date()
 
         for lot in holdings:
             if isinstance(lot, Lot):
@@ -253,11 +317,13 @@ class TaxOptimizerNode:
                 cost = lot.cost_basis
                 price = lot.current_price
                 lot_dict = lot.model_dump()
+                acquired_date = lot.acquired_date
             else:
                 qty = float(lot.get("quantity", 0.0))
                 cost = float(lot.get("cost_basis", 0.0))
                 price = float(lot.get("current_price", 0.0))
                 lot_dict = dict(lot)
+                acquired_date = lot.get("acquired_date", "2023-01-01")
 
             current_val = qty * price
             cost_total = qty * cost
@@ -265,6 +331,23 @@ class TaxOptimizerNode:
 
             lot_dict["unrealized_gain_loss"] = unrealized_gain_loss
             lot_dict["unrealized_gain_loss_per_share"] = price - cost
+
+            # Holding period classification
+            try:
+                acquired = datetime.fromisoformat(acquired_date).date()
+                days_held = (today - acquired).days
+            except (ValueError, TypeError):
+                days_held = 0
+            is_short_term = days_held <= 365
+            lot_dict["is_short_term"] = is_short_term
+            lot_dict["days_held"] = days_held
+            holding_period_entries.append({
+                "lot_id": str(lot_dict.get("lot_id", "")),
+                "symbol": lot_dict.get("symbol", ""),
+                "days_held": days_held,
+                "is_short_term": is_short_term,
+            })
+
             ranked.append(lot_dict)
 
         # Deterministic wash-sale check: same symbol acquired within 30 days
@@ -277,15 +360,47 @@ class TaxOptimizerNode:
                 for other in ranked
             )
 
+        # Sector concentration analysis
+        sector_values = {}
+        total_value = sum(
+            (lot.get("quantity", 0) * lot.get("current_price", 0))
+            for lot in ranked
+        )
+        for lot in ranked:
+            symbol = lot.get("symbol", "")
+            sector = _SECTOR_MAP.get(symbol.upper(), "Unknown")
+            value = lot.get("quantity", 0) * lot.get("current_price", 0)
+            sector_values[sector] = sector_values.get(sector, 0.0) + value
+
+        sector_concentration = {
+            s: (v / total_value if total_value > 0 else 0.0)
+            for s, v in sector_values.items()
+        }
+
+        concentration_warning = None
+        for sector, pct in sector_concentration.items():
+            if pct > self.concentration_threshold:
+                concentration_warning = (
+                    f"Sector '{sector}' represents {pct:.0%} of portfolio "
+                    f"(threshold: {self.concentration_threshold:.0%}). "
+                    f"Consider diversifying to reduce concentration risk."
+                )
+                break
+
         # Sort ascending by unrealized gain/loss (largest loss first)
         ranked.sort(key=lambda x: x["unrealized_gain_loss"])
 
-        return {"ranked_lots": ranked}
+        return {
+            "ranked_lots": ranked,
+            "holding_period_days": holding_period_entries,
+            "sector_concentration": sector_concentration,
+            "concentration_warning": concentration_warning,
+        }
 
 
 SYSTEM_PROMPT = """You are the Reasoning node in a deterministic financial-agent pipeline called Collateral.
 
-Your ONLY job: synthesize the risk_state, headroom, and ranked_lots values you are given into a structured Recommendation. You do not have access to markets, cannot execute trades, and must not invent numbers.
+Your ONLY job: synthesize the risk_state, headroom, ranked_lots, holding_period_days, and sector_concentration values you are given into a structured Recommendation. You do not have access to markets, cannot execute trades, and must not invent numbers.
 
 Hard rules:
 1. Do NOT recompute LTV, headroom, collateral value, or gain/loss — those are already computed upstream and correct. Use them as given.
@@ -297,6 +412,8 @@ Hard rules:
 7. Output must strictly conform to the Recommendation schema you were bound with — no extra fields, no prose outside the schema.
 8. If asked to explain resulting LTV after a hypothetical sale, do not compute new LTV values yourself — collateral value decreases by the amount sold (shrinking-collateral feedback loop), which is easy to get wrong. Only speak in terms of the given risk_state/headroom, or explicitly state that a precise pro-forma figure requires re-running the optimizer.
 9. When only one lot of a symbol currently exists, still note that a wash-sale risk could arise if the user repurchases the same or a substantially identical security within 30 days after this sale — that risk cannot be evaluated from current data alone.
+10. When proposing lot sales, prefer selling short-term loss lots over long-term loss lots (short-term losses offset ordinary income at higher rates). Note holding period in your rationale when relevant.
+11. If sector_concentration_warning is provided, acknowledge it in your rationale and note that diversification may be advisable.
 """
 
 
@@ -385,13 +502,20 @@ class ReasoningAgentNode:
         headroom = state.get("headroom", 0.0)
         ranked_lots = state.get("ranked_lots", [])
         cash_need = float(state.get("cash_need", 0.0))
+        holding_period_days = state.get("holding_period_days", [])
+        sector_concentration = state.get("sector_concentration", {})
+        concentration_warning = state.get("concentration_warning")
         valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
 
         user_data = (
             f"risk_state: {risk_state}\n"
             f"headroom_dollars: {headroom:.2f}\n"
             f"cash_need_requested: {cash_need:.2f}\n"
-            f"ranked_lots (losses first, wash_sale_caution precomputed):\n"
+            f"sector_concentration: {json.dumps(sector_concentration, default=str)}\n"
+            f"concentration_warning: {concentration_warning or 'None'}\n"
+            f"holding_period_days (lot_id, days_held, is_short_term):\n"
+            f"{json.dumps(holding_period_days, indent=2, default=str)}\n"
+            f"ranked_lots (losses first, wash_sale_caution precomputed, is_short_term precomputed):\n"
             f"{json.dumps(ranked_lots, indent=2, default=str)}"
         )
         messages = [
@@ -464,10 +588,10 @@ class ReasoningAgentNode:
             # Build action and rationale based on what triggered the sale
             if deficit > 0 and cash_need > 0:
                 rec_action = "Liquidate holdings to restore headroom and fulfill cash withdrawal."
-                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit plus a ${cash_need:.2f} cash withdrawal request. Total needed: ${needed_proceeds:.2f}. Proposed selling losses first to maximize tax harvesting."
+                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit plus a ${cash_need:.2f} cash withdrawal request. Total needed: ${needed_proceeds:.2f}. Proposed selling short-term losses first to maximize tax harvesting."
             elif deficit > 0:
                 rec_action = "Liquidate tax-loss holdings to restore borrowing headroom."
-                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling losses first to maximize tax harvesting."
+                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling short-term losses first to maximize tax harvesting."
             elif cash_need > 0:
                 rec_action = f"Sell holdings to fulfill ${cash_need:.2f} cash withdrawal request."
                 rationale = f"Portfolio is {risk_state} but holder requested ${cash_need:.2f} cash. Selling least-tax-cost lots to fulfill while maintaining headroom."

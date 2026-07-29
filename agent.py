@@ -20,6 +20,7 @@ from nodes import (
     ReasoningAgentNode,
     HumanApprovalNode,
     ExecutionNode,
+    SafeSkipNode,
 )
 
 # Attempt to import official LangGraph components
@@ -79,6 +80,15 @@ def _build_checkpointer(checkpointer_type: str = "memory", db_url: str = None):
     return InMemorySaver()
 
 
+def _route_after_ltv(state: dict) -> str:
+    """Conditional edge: skip tax optimizer + LLM if Safe and no cash need."""
+    risk = state.get("risk_state", "Safe")
+    cash_need = float(state.get("cash_need", 0.0))
+    if risk == "Safe" and cash_need == 0.0:
+        return "safe_skip"
+    return "tax_optimizer"
+
+
 if HAS_LANGGRAPH:
     def create_graph(
         source_path: str = "fixtures/fake_users.json",
@@ -95,6 +105,7 @@ if HAS_LANGGRAPH:
         reasoning_agent = ReasoningAgentNode()
         human_approval = HumanApprovalNode()
         execution = ExecutionNode()
+        safe_skip = SafeSkipNode()
 
         # Add nodes
         builder.add_node("ingest", ingest)
@@ -103,18 +114,27 @@ if HAS_LANGGRAPH:
         builder.add_node("reasoning_agent", reasoning_agent)
         builder.add_node("human_approval", human_approval)
         builder.add_node("execution", execution)
+        builder.add_node("safe_skip", safe_skip)
 
-        # Connect linear edges
+        # Connect edges
         builder.add_edge(START, "ingest")
         builder.add_edge("ingest", "ltv_monitor")
-        
-        # BRANCH POINT (later): skip tax/LLM steps if risk_state == "Safe"
-        
-        builder.add_edge("ltv_monitor", "tax_optimizer")
+
+        # Conditional branch: skip tax/LLM/approval if Safe + no cash need
+        builder.add_conditional_edges(
+            "ltv_monitor",
+            _route_after_ltv,
+            {
+                "tax_optimizer": "tax_optimizer",
+                "safe_skip": "safe_skip",
+            },
+        )
+
         builder.add_edge("tax_optimizer", "reasoning_agent")
         builder.add_edge("reasoning_agent", "human_approval")
         builder.add_edge("human_approval", "execution")
         builder.add_edge("execution", END)
+        builder.add_edge("safe_skip", END)
 
         checkpointer = _build_checkpointer(checkpointer_type, db_url)
         return builder.compile(checkpointer=checkpointer)
@@ -131,6 +151,7 @@ else:
             self.state_schema = state_schema
             self.nodes = {}
             self.edges = []
+            self.conditional_edges = []
 
         def add_node(self, name, node_inst):
             self.nodes[name] = node_inst
@@ -138,43 +159,61 @@ else:
         def add_edge(self, source, target):
             self.edges.append((source, target))
 
+        def add_conditional_edges(self, source, condition_fn, mapping):
+            self.conditional_edges.append((source, condition_fn, mapping))
+
         def compile(self, checkpointer=None):
-            return CompiledGraph(self.nodes, checkpointer=checkpointer)
+            return CompiledGraph(self.nodes, self.edges, self.conditional_edges, checkpointer=checkpointer)
 
     class CompiledGraph:
-        def __init__(self, nodes, checkpointer=None):
+        def __init__(self, nodes, edges, conditional_edges, checkpointer=None):
             self.nodes = nodes
+            self.edges = edges
+            self.conditional_edges = conditional_edges
             self.checkpointer = checkpointer
             self._state_store = {}  # thread_id -> dict (simulates persistence)
+
+        def _next_node(self, current: str, state: dict) -> str:
+            """Determine next node given current node and state."""
+            # Check conditional edges first
+            for src, cond_fn, mapping in self.conditional_edges:
+                if src == current:
+                    key = cond_fn(state)
+                    target = mapping.get(key)
+                    if target:
+                        return target
+
+            # Fall back to linear edges
+            for src, tgt in self.edges:
+                if src == current:
+                    return tgt
+            return None
 
         def invoke(self, initial_state, config=None, stop_before=None):
             state = dict(initial_state or {})
             thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
 
-            # Linear execution order (walks self.edges would be better, but
-            # this matches the hardcoded sequence for now)
-            sequence = [
-                "ingest",
-                "ltv_monitor",
-                "tax_optimizer",
-                "reasoning_agent",
-                "human_approval",
-                "execution"
-            ]
+            current = "ingest"
+            visited = set()
 
-            for name in sequence:
-                if stop_before and name == stop_before:
+            while current:
+                if stop_before and current == stop_before:
                     break
-                
+                if current in visited:
+                    logger.error("Cycle detected at node %s — aborting", current)
+                    break
+                visited.add(current)
+
                 # Check interrupt condition for human approval node
-                if name == "human_approval" and "approved" not in state:
-                    # Pause before execution node if human approval not yet provided
+                if current == "human_approval" and "approved" not in state:
                     break
 
-                node_fn = self.nodes[name]
+                node_fn = self.nodes[current]
                 updates = node_fn(state)
                 if updates:
                     state.update(updates)
+
+                current = self._next_node(current, state)
 
             # Persist state keyed by thread_id so get_state() works
             self._state_store[thread_id] = dict(state)
@@ -200,6 +239,7 @@ else:
         reasoning_agent = ReasoningAgentNode()
         human_approval = HumanApprovalNode()
         execution = ExecutionNode()
+        safe_skip = SafeSkipNode()
 
         builder.add_node("ingest", ingest)
         builder.add_node("ltv_monitor", ltv_monitor)
@@ -207,17 +247,26 @@ else:
         builder.add_node("reasoning_agent", reasoning_agent)
         builder.add_node("human_approval", human_approval)
         builder.add_node("execution", execution)
+        builder.add_node("safe_skip", safe_skip)
 
         builder.add_edge("START", "ingest")
         builder.add_edge("ingest", "ltv_monitor")
 
-        # BRANCH POINT (later): skip tax/LLM steps if risk_state == "Safe"
+        # Conditional branch: skip tax/LLM/approval if Safe + no cash need
+        builder.add_conditional_edges(
+            "ltv_monitor",
+            _route_after_ltv,
+            {
+                "tax_optimizer": "tax_optimizer",
+                "safe_skip": "safe_skip",
+            },
+        )
 
-        builder.add_edge("ltv_monitor", "tax_optimizer")
         builder.add_edge("tax_optimizer", "reasoning_agent")
         builder.add_edge("reasoning_agent", "human_approval")
         builder.add_edge("human_approval", "execution")
         builder.add_edge("execution", "END")
+        builder.add_edge("safe_skip", "END")
 
         # Fallback runner ignores checkpointer_type/db_url (no real persistence),
         # but accepts the param for API compatibility.
