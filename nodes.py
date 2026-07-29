@@ -258,9 +258,10 @@ class SafeSkipNode:
     """Branch node — reached when risk_state == "Safe" and no cash_need.
     Generates a benign Recommendation and skips the tax optimizer, LLM, and human approval.
     Avoids wasting LLM tokens on portfolios that need no action.
+    Also writes to the audit log so Safe runs are compliance-logged.
     """
-    def __init__(self):
-        pass
+    def __init__(self, audit_logger: "AuditLogger" = None):
+        self.audit = audit_logger or AuditLogger()
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         headroom = state.get("headroom", 0.0)
@@ -274,13 +275,16 @@ class SafeSkipNode:
                 f"No liquidation or tax optimization needed."
             ),
         )
+        result = {
+            "status": "skipped",
+            "message": "Portfolio is Safe with no cash need — tax optimizer and LLM skipped.",
+        }
+        # Audit-log the safe-skip so it appears in the compliance trail
+        self.audit.log(state)
         return {
             "recommendation": recommendation,
             "approved": True,
-            "result": {
-                "status": "skipped",
-                "message": "Portfolio is Safe with no cash need — tax optimizer and LLM skipped.",
-            },
+            "result": result,
         }
 
 
@@ -679,7 +683,11 @@ class ReasoningAgentNode:
         concentration_warning = state.get("concentration_warning")
         valid_lot_ids = {str(lot["lot_id"]) for lot in ranked_lots}
 
+        account_obj = state.get("account")
+        cost_basis_method = account_obj.cost_basis_method if isinstance(account_obj, Account) else getattr(account_obj, "get", lambda k, d=None: d)("cost_basis_method", "tax_loss_harvest") if isinstance(account_obj, dict) else "tax_loss_harvest"
+
         user_data = (
+            f"cost_basis_method: {cost_basis_method}\n"
             f"risk_state: {risk_state}\n"
             f"headroom_dollars: {headroom:.2f}\n"
             f"cash_need_requested: {cash_need:.2f}\n"
@@ -696,6 +704,7 @@ class ReasoningAgentNode:
         ]
 
         recommendation = None
+        provider_used = "deterministic"
 
         # Check disk cache first (skip cache for cash_need queries — they vary)
         cache_key = None
@@ -707,6 +716,7 @@ class ReasoningAgentNode:
             if cached:
                 try:
                     recommendation = Recommendation(**cached)
+                    provider_used = "cache"
                     logger.info("[ReasoningAgentNode] Disk cache hit")
                 except Exception:
                     pass  # corrupted cache entry — fall through to LLM
@@ -730,14 +740,14 @@ class ReasoningAgentNode:
                     logger.error("[ReasoningAgentNode] %s returned unknown lot_id(s) — discarding", label)
                     continue
                 recommendation = result
+                provider_used = label.lower()
                 self.circuit_breaker.record_success(label)
                 logger.info("[ReasoningAgentNode] %s produced valid recommendation", label)
-                # Populate is_long_term on each proposed lot
+                # Populate is_long_term on each proposed lot (always overwrite — LLM field is unreliable)
                 lot_term_map = {str(lp.get("lot_id", "")): not lp.get("is_short_term", True)
                                 for lp in state.get("holding_period_days", [])}
                 for p in recommendation.proposed_lots:
-                    if not p.is_long_term:
-                        p.is_long_term = lot_term_map.get(str(p.lot_id), False)
+                    p.is_long_term = lot_term_map.get(str(p.lot_id), False)
                 # Cache the result
                 if self._cache and cache_key and cash_need == 0.0:
                     self._cache.set(cache_key, recommendation.model_dump(mode="json"), expire=86400)
@@ -787,12 +797,20 @@ class ReasoningAgentNode:
                 resulting_ltv = None
 
             # Build action and rationale based on what triggered the sale
+            _METHOD_DESC = {
+                "fifo": "oldest lots first (FIFO)",
+                "lifo": "newest lots first (LIFO)",
+                "hifo": "highest-cost lots first (HIFO)",
+                "tax_loss_harvest": "short-term losses first to maximize tax harvesting",
+                "specific": "the account holder's specified lot order",
+            }
+            method_desc = _METHOD_DESC.get(str(cost_basis_method), "short-term losses first")
             if deficit > 0 and cash_need > 0:
                 rec_action = "Liquidate holdings to restore headroom and fulfill cash withdrawal."
-                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit plus a ${cash_need:.2f} cash withdrawal request. Total needed: ${needed_proceeds:.2f}. Proposed selling short-term losses first to maximize tax harvesting."
+                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit plus a ${cash_need:.2f} cash withdrawal request. Total needed: ${needed_proceeds:.2f}. Proposed selling {method_desc}."
             elif deficit > 0:
                 rec_action = "Liquidate tax-loss holdings to restore borrowing headroom."
-                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling short-term losses first to maximize tax harvesting."
+                rationale = f"Account is in {risk_state} with a ${deficit:.2f} deficit. Proposed selling {method_desc}."
             elif cash_need > 0:
                 rec_action = f"Sell holdings to fulfill ${cash_need:.2f} cash withdrawal request."
                 rationale = f"Portfolio is {risk_state} but holder requested ${cash_need:.2f} cash. Selling least-tax-cost lots to fulfill while maintaining headroom."
@@ -815,7 +833,7 @@ class ReasoningAgentNode:
                 rationale=rationale
             )
 
-        return {"recommendation": recommendation}
+        return {"recommendation": recommendation, "_provider_used": provider_used}
 
 
 class HumanApprovalNode:

@@ -21,6 +21,7 @@ from nodes import (
     HumanApprovalNode,
     ExecutionNode,
     SafeSkipNode,
+    AuditLogger,
 )
 
 # Attempt to import official LangGraph components
@@ -104,8 +105,9 @@ if HAS_LANGGRAPH:
         tax_optimizer = TaxOptimizerNode()
         reasoning_agent = ReasoningAgentNode()
         human_approval = HumanApprovalNode()
-        execution = ExecutionNode()
-        safe_skip = SafeSkipNode()
+        audit = AuditLogger()
+        execution = ExecutionNode(audit_logger=audit)
+        safe_skip = SafeSkipNode(audit_logger=audit)
 
         # Add nodes
         builder.add_node("ingest", ingest)
@@ -246,8 +248,9 @@ else:
         tax_optimizer = TaxOptimizerNode()
         reasoning_agent = ReasoningAgentNode()
         human_approval = HumanApprovalNode()
-        execution = ExecutionNode()
-        safe_skip = SafeSkipNode()
+        audit = AuditLogger()
+        execution = ExecutionNode(audit_logger=audit)
+        safe_skip = SafeSkipNode(audit_logger=audit)
 
         builder.add_node("ingest", ingest)
         builder.add_node("ltv_monitor", ltv_monitor)
