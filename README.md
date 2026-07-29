@@ -6,6 +6,9 @@ A full-stack AI agent that monitors portfolio loan-to-value ratios, proposes tax
 
 - **Real-time market data** — yfinance integration fetches live prices for all holdings (falls back to static fixtures)
 - **Tax-efficient lot optimization** — Sells biggest losses first to harvest tax deductions, with wash-sale detection (IRC §1091)
+- **Short-term vs long-term gains** — Holding period classification per lot; prefers selling short-term losses (higher tax offset against ordinary income)
+- **Sector concentration analysis** — GICS-like sector mapping with configurable threshold (default 40%); warns when any sector exceeds it
+- **Conditional graph branching** — Safe portfolios with no cash need skip the tax optimizer, LLM, and human approval entirely (saves LLM tokens)
 - **Multi-provider LLM fallback** — Groq → Poolside → OpenRouter → deterministic (never fails)
 - **MCP tools** — Call `check_ltv` or `optimize_sale` directly from Claude Desktop / Claude Code
 - **Slack alerts** — Proactive webhook notifications on High Risk / margin call detection (fires immediately, before human approval)
@@ -14,7 +17,9 @@ A full-stack AI agent that monitors portfolio loan-to-value ratios, proposes tax
 
 ## Architecture
 
-Six-node linear graph (`ingest → ltv_monitor → tax_optimizer → reasoning_agent → human_approval → execution`), implemented in both **Python LangGraph** (batch/test) and **TypeScript Express/React** (interactive web UI).
+Six-node graph (`ingest → ltv_monitor → tax_optimizer → reasoning_agent → human_approval → execution`), implemented in both **Python LangGraph** (batch/test) and **TypeScript Express/React** (interactive web UI).
+
+Conditional branching: Safe portfolios with no cash need skip the tax optimizer, LLM, and human approval via `SafeSkipNode` (saves LLM tokens).
 
 Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes are deterministic Python — no LLM inference for math, wash-sale detection, or state derivation.
 
@@ -24,10 +29,11 @@ Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes 
 |---|---|---|
 | 1 | `IngestPortfolioNode` | Validates raw JSON into Pydantic `Account` model. Fetches live prices via yfinance. Malformed fixtures fail loudly here. |
 | 2 | `LTVMonitorNode` | Computes `collateral_value`, `current_ltv`, `headroom`, `risk_state`. Sends Slack alert immediately on High Risk. Deterministic math. |
-| 3 | `TaxOptimizerNode` | Ranks lots (losses first), detects wash sales (same-symbol-within-30-days), produces `ranked_lots`. |
-| 4 | `ReasoningAgentNode` | **Only LLM node.** Synthesizes risk/headroom/lots into a structured `Recommendation`. 3-provider fallback chain. |
+| 3 | `TaxOptimizerNode` | Ranks lots (losses first), detects wash sales (same-symbol-within-30-days), computes holding period (`is_short_term`/`days_held`), analyzes sector concentration, produces `ranked_lots`. |
+| 4 | `ReasoningAgentNode` | **Only LLM node.** Synthesizes risk/headroom/lots/holding-period/concentration into a structured `Recommendation`. 3-provider fallback chain. |
 | 5 | `HumanApprovalNode` | Pauses via `interrupt()` for human review. On resume, sets `approved`. |
 | 6 | `ExecutionNode` | Logs the final decision (dry-run; no live trades). |
+| — | `SafeSkipNode` | Branch node — generates a benign `Recommendation` and skips tax/LLM/approval when portfolio is Safe with no cash need. |
 
 ## LLM Provider Chain
 
@@ -46,7 +52,6 @@ All providers use `with_structured_output(Recommendation, method="function_calli
 |---|---|---|
 | `llama-3.3-70b-versatile` | 128K tokens | Structured output, function calling (recommended) |
 | `llama-3.1-8b-instant` | 128K tokens | Ultra-low latency, quick responses |
-| `mixtral-8x7b-32768` | 32K tokens | Long context, multi-turn conversations |
 | `gemma2-9b-it` | 8K tokens | Lightweight, efficient for simple tasks |
 
 ## Correct LTV Formula
@@ -136,12 +141,13 @@ All keys go in `.env.local` (loaded by both Python and Node entry points).
 
 | File | Purpose |
 |---|---|
-| `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), all 6 node classes, `SYSTEM_PROMPT` (9 rules), `AgentState` (includes `cash_need`) |
-| `agent.py` | LangGraph `StateGraph` builder, configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` |
+| `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), 7 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (11 rules), `AgentState` (includes `cash_need`, `holding_period_days`, `sector_concentration`, `concentration_warning`) |
+| `agent.py` | LangGraph `StateGraph` builder with conditional edges (`_route_after_ltv`), configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` with `_next_node` graph walker |
 | `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures, asserts correctness |
 | `server.ts` | Express backend — Groq + Poolside + OpenRouter fallback chain, chat + analyze + audit + live-prices endpoints, `/api/health` |
 | `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools for Claude Desktop / Claude Code |
-| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math |
+| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math, sector concentration, holding period classification |
+| `src/types.ts` | TypeScript interfaces — `ProposedLot` includes `is_short_term`/`days_held`, `ProposalOutput` includes sector concentration fields |
 | `check_providers.py` | Pre-flight health check — pings all 3 providers + yfinance + Slack |
 | `fixtures/fake_users.json` | 6 synthetic test accounts |
 | `requirements.txt` | Python deps including `langchain-openai`, `yfinance>=1.5.0`, `fastmcp>=3.0.0,<4.0.0` (requires Python 3.10+) |

@@ -98,8 +98,8 @@ python check_providers.py
 
 | File | What It Does |
 |---|---|
-| `nodes.py` | All Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), 6 node classes, `SYSTEM_PROMPT` (9 rules), `AgentState` |
-| `agent.py` | Builds the LangGraph `StateGraph`, configurable checkpointer, exports `run_portfolio_audit()` |
+| `nodes.py` | All Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), 7 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (11 rules), `AgentState` |
+| `agent.py` | Builds the LangGraph `StateGraph` with conditional edges, configurable checkpointer, fallback `CompiledGraph` with graph walker |
 | `run_fixtures.py` | Test runner — iterates 6 fixtures, asserts correctness |
 | `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools |
 | `check_providers.py` | Pre-flight health check — pings all providers + yfinance + Slack |
@@ -114,7 +114,8 @@ python check_providers.py
 | `src/App.tsx` | Main React app — model selector, preset configs, audit workflow |
 | `src/components/OptimizationProposal.tsx` | Renders proposals — tax lots, LTV gauge, wash-sale warnings, export audit trail |
 | `src/components/ChatAssistant.tsx` | Chat interface — ask questions about portfolio, uses Groq |
-| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math |
+| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math, sector concentration, holding period classification |
+| `src/types.ts` | TypeScript interfaces — `ProposedLot` with `is_short_term`/`days_held`, `ProposalOutput` with sector fields |
 
 ### Config & Data
 
@@ -131,7 +132,7 @@ python check_providers.py
 
 | File | What It Does |
 |---|---|
-| `tests/test_nodes.py` | 54 unit + e2e tests for all Python nodes |
+| `tests/test_nodes.py` | 66 unit + e2e tests for all Python nodes (including SafeSkipNode, holding period, sector concentration) |
 | `tests/test_mcp.py` | 8 tests for MCP server tools |
 
 ### Docs

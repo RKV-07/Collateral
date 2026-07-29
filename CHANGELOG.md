@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Conditional graph branching** (`agent.py`): `SafeSkipNode` + `add_conditional_edges` — Safe portfolios with no cash_need skip the tax optimizer, LLM, and human approval entirely. Saves LLM tokens for healthy portfolios. Fallback runner updated with `_next_node` graph walker to support conditional edges.
+- **Short-term vs long-term capital gain analysis** (`nodes.py`): `TaxOptimizerNode` computes `days_held` and `is_short_term` (<=365 days) per lot. Serialized into `lot_dict` (avoids `@property` serialization bug). `holding_period_days` added to `AgentState`. SYSTEM_PROMPT rule 10 prefers selling short-term losses (higher tax offset against ordinary income).
+- **Sector concentration analysis** (`nodes.py`): GICS-like sector mapping for 60+ tickers. `TaxOptimizerNode` computes per-sector portfolio weight with configurable threshold (default 40%). `sector_concentration` dict and `concentration_warning` message added to state. Empty-holdings guard prevents division-by-zero. Does NOT overwrite `risk_state` (owned by `LTVMonitorNode`).
+- **`SafeSkipNode`** (`nodes.py`): New branch node — generates a benign `Recommendation` with `risk_state="Safe"`, `proposed_lots=[]`, and `result["status"]="skipped"`. Sets `approved=True` so execution node logs "skipped" without human approval.
+- **SYSTEM_PROMPT rules 10-11** (`nodes.py`): Rule 10 — prefer selling short-term loss lots. Rule 11 — acknowledge sector concentration warnings in rationale.
+- **TypeScript sector concentration** (`src/utils.ts`): `SECTOR_MAP` with 60+ tickers, `getDaysHeld()`, sector concentration analysis, short/long-term loss totals in `calculateOptimizer()` output.
+- **TypeScript holding period** (`src/types.ts`): `ProposedLot` gains `is_short_term` and `days_held` optional fields. `ProposalOutput` gains `sector_concentration`, `concentration_warning`, `short_term_loss_total`, `long_term_loss_total`.
+- **12 new tests** (`tests/test_nodes.py`): `TestSafeSkipNode` (4 tests), holding period short/long-term (2 tests), sector concentration warning/no-warning/empty (3 tests), conditional branching e2e (3 tests). Total: 66 node tests + 8 MCP tests = 74 passing.
 - **Groq provider** (`nodes.py`, `server.ts`): Replaced Google AI Studio (Gemini direct API) with Groq as primary LLM provider (`api.groq.com/openai/v1`). Model `llama-3.3-70b-versatile` — fast inference, free tier ~14,400 req/day, excellent structured output support. Fallback chain: Groq → Poolside → OpenRouter → deterministic.
 - **yfinance live prices** (`nodes.py`): `IngestPortfolioNode` fetches real-time market prices via `yfinance` for each holding symbol. Falls back to static fixture prices per-symbol if yfinance is unavailable or the API call fails. Web UI also gets a `/api/portfolio/prices` endpoint for live price lookups.
 - **FastMCP server** (`mcp_server.py`): Exposes `check_ltv` and `optimize_sale` as MCP tools callable from Claude Desktop / Claude Code. Run with `python mcp_server.py` or `mcp run mcp_server.py`. Node instances built at module level for reuse across calls.
@@ -31,6 +39,10 @@
 - **Health endpoint** (`server.ts`): `/api/health` now reports `hasPoolsideKey` alongside Groq and OpenRouter.
 
 ### Fixed
+- **Decommissioned model removed** (`src/App.tsx`): Removed `mixtral-8x7b-32768` from `AVAILABLE_MODELS` — model is decommissioned by Groq and returns 404.
+- **Chat default model** (`server.ts`): Fixed chat endpoint default from `gemini-3-flash-preview` to `llama-3.3-70b-versatile`.
+- **`marketEvent` logic** (`src/utils.ts`): Now checks `headroom < 0` before escalating to High Risk — previously any market event unconditionally set `risk_state = "High Risk"` regardless of actual headroom.
+- **Fixture rate limiting** (`run_fixtures.py`): Added 2-second delay between fixture iterations to avoid Groq 429 rate limits.
 - **Fallback order** (`nodes.py`, `check_providers.py`): Poolside now falls back before OpenRouter — chain is Groq → Poolside → OpenRouter → deterministic. Poolside is more reliable for structured output; OpenRouter free tier has aggressive rate limits.
 - **yfinance reinstall** (`.venv`): Corrupted yfinance install (missing `__init__.py`, only `__pycache__/`) — recreated venv from scratch with `uv venv --python 3.10` and `uv pip install -r requirements.txt`. yfinance 1.5.2 verified working (`AAPL` price: $339.78).
 - **Python 3.14 hang** (`.venv`): Recreated venv on Python 3.10 — `langchain_core.messages` imports hung indefinitely on Python 3.14.
