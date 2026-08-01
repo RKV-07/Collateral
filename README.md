@@ -1,5 +1,8 @@
 # Collateral — Portfolio Liquidity & Tax Optimizer Agent
 
+#### Simply Put
+> Imagine you got a loan using your stocks as collateral, like a home mortgage but with shares. If your stocks dip, the bank says "your collateral is too thin — add money, or we sell your shares at whatever price we can get." This app is a watchman that measures your collateral-to-debt ratio every time prices move, pings you on Slack the instant you're in danger, and — when you do have to sell — tells you which shares to sell first so you harvest the biggest tax loss, avoid the "buy-it-back-too-soon" tax penalty, and get back under the limit by selling the smallest amount necessary.
+
 A full-stack AI agent that monitors portfolio loan-to-value ratios, proposes tax-efficient lot sales, and explains its reasoning in plain English.
 
 ## Features
