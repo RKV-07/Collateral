@@ -1,106 +1,122 @@
-# Collateral — Portfolio Liquidity & Tax Optimizer Agent
+# Collateral — The Watchman for Stock-Backed Loans
 
-#### Simply Put
-> Imagine you got a loan using your stocks as collateral, like a home mortgage but with shares. If your stocks dip, the bank says "your collateral is too thin — add money, or we sell your shares at whatever price we can get." This app is a watchman that measures your collateral-to-debt ratio every time prices move, pings you on Slack the instant you're in danger, and — when you do have to sell — tells you which shares to sell first so you harvest the biggest tax loss, avoid the "buy-it-back-too-soon" tax penalty, and get back under the limit by selling the smallest amount necessary.
+> A full-stack AI agent that watches your collateral-to-loan ratio, alerts you the instant a margin call is near, and tells you — in plain English — which shares to sell first so the forced liquidation harvests the biggest tax loss instead of the biggest tax bill.
 
-A full-stack AI agent that monitors portfolio loan-to-value ratios, proposes tax-efficient lot sales, and explains its reasoning in plain English.
+---
 
-## Features
+## 1. The Story
 
-- **Real-time market data** — yfinance integration fetches live prices for all holdings (falls back to static fixtures)
-- **Tax-efficient lot optimization** — Sells biggest losses first to harvest tax deductions, with wash-sale detection (IRC §1091)
-- **Short-term vs long-term gains** — Holding period classification per lot; prefers selling short-term losses (higher tax offset against ordinary income). Deterministic sort, not LLM-dependent.
-- **Cost basis method selection** — FIFO, LIFO, HIFO, Tax-Loss Harvest (default), Specific. `Account.cost_basis_method` field.
-- **Sector concentration analysis** — GICS-like sector mapping with configurable threshold (default 40%); warns when any sector exceeds it
-- **Conditional graph branching** — Safe portfolios with no cash need skip the tax optimizer, LLM, and human approval entirely (saves LLM tokens)
-- **Circuit breaker** — Skips LLM providers after 3 consecutive failures for 60s, auto-retries. Prevents hammering dead providers.
-- **Disk cache** — Caches LLM responses for 24h (SHA-256 key). Avoids burning quota on identical prompts.
-- **Persistent audit log** — Append-only SQLite trail (`collateral_audit.db`) for every pipeline run. Compliance-ready.
-- **Multi-provider LLM fallback** — Groq → Poolside → OpenRouter → deterministic (never fails)
-- **MCP tools** — Call `check_ltv` or `optimize_sale` directly from Claude Desktop / Claude Code
-- **Slack alerts** — Proactive webhook notifications on High Risk / margin call detection with cooldown rate-limiting (fires immediately, before human approval)
-- **Export audit trail** — Download full decision log as JSON for compliance / record-keeping
-- **Human-in-the-loop** — Agent proposes, human approves. No automated trades without consent.
+Imagine you borrowed money against your stocks — a home mortgage, but your shares are the house. The bank agrees to lend you up to half the value of your portfolio. Now the market dips. Your shares shrink, your loan doesn't, and the ratio between them starts creeping toward the limit.
 
-## Architecture
+When you cross that line, the bank doesn't call you for a chat. It issues a **margin call**: *"Your collateral is too thin — post more money, or we sell your shares at whatever price we can get."* In a panic, forced selling happens at the worst prices, and the tax bill lands exactly when you can afford it least.
 
-Six-node graph (`ingest → ltv_monitor → tax_optimizer → reasoning_agent → human_approval → execution`), implemented in both **Python LangGraph** (batch/test) and **TypeScript Express/React** (interactive web UI).
+**Collateral is the watchman between you and that moment.** It measures your loan-to-value ratio every time prices move, pings you on Slack the instant you're in danger, and — when a sale is genuinely necessary — tells you **which lots to sell first**: the ones that harvest the largest capital loss, that avoid the "buy-it-back-too-soon" wash-sale penalty, and that restore your headroom by selling the smallest amount necessary.
 
-Conditional branching: Safe portfolios with no cash need skip the tax optimizer, LLM, and human approval via `SafeSkipNode` (saves LLM tokens).
+It does all of this with **mathematics as the source of truth and AI as the explainer** — a design choice we're proud of, and one that makes the difference between a chatbot and a trustworthy financial agent. No automated trades, ever. The agent proposes; you approve.
 
-Only Node 4 (`ReasoningAgentNode`) is allowed to invoke an LLM. All other nodes are deterministic Python — no LLM inference for math, wash-sale detection, or state derivation.
+---
 
-### Nodes
+## 2. What It Gives You
 
-| # | Node | Role |
-|---|---|---|
-| 1 | `IngestPortfolioNode` | Validates raw JSON into Pydantic `Account` model. Fetches live prices via yfinance. Computes holding periods (`days_held`, `is_short_term`) per lot. No-ops if prior state exists. |
-| 2 | `LTVMonitorNode` | Computes `collateral_value`, `current_ltv`, `headroom`, `risk_state`. Sends Slack alert with cooldown rate-limiting on High Risk / margin calls. `notify=False` for read-only contexts. No-ops if prior state exists. |
-| 3 | `TaxOptimizerNode` | Ranks lots by chosen cost basis method (FIFO/LIFO/HIFO/TLH/Specific). Detects wash sales (same-symbol-within-30-days), maps sectors, computes concentration. Sort is short-term-aware: losses before gains, short-term before long-term. |
-| 4 | `ReasoningAgentNode` | **Only LLM node.** Synthesizes risk/headroom/lots/holding-period/concentration into a structured `Recommendation`. 3-provider fallback chain with circuit breaker + disk cache. |
-| 5 | `HumanApprovalNode` | Pauses via `interrupt()` for human review. On resume, sets `approved`. |
-| 6 | `ExecutionNode` | Writes audit log to SQLite (`collateral_audit.db`). Logs the final decision (dry-run; no live trades). |
-| — | `SafeSkipNode` | Branch node — generates a benign `Recommendation` and skips tax/LLM/approval when portfolio is Safe with no cash need. |
+- **Live risk monitoring** — fetches real-time prices for every holding and recomputes your LTV, headroom, and risk state on every run.
+- **Proactive margin-call alerts** — fires a Slack notification the *moment* you cross into High Risk, before anyone has to ask.
+- **Tax-efficient "what to sell first"** — ranks your tax lots by cost-basis method (default: tax-loss harvesting), preferring short-term losses, and flags wash-sale risk (IRC §1091).
+- **Plain-English reasoning** — an AI explains the recommendation in language you can read, question, and understand before approving anything.
+- **Human-in-the-loop approval** — the pipeline pauses and waits for *you*. Nothing is executed without consent.
+- **Audit trail for everything** — every run, decision, and provider used is appended to a compliance-ready SQLite log you can export as JSON.
+- **Works where you work** — an interactive web dashboard, a Python batch runner, and MCP tools you can call straight from Claude Desktop / Claude Code.
 
-## LLM Provider Chain
+---
 
-`ReasoningAgentNode` tries providers in order, falling through on failure:
+## 3. How It Works
 
-1. **Groq** (`llama-3.3-70b-versatile`) — primary (fast inference, free tier ~14,400 req/day, OpenAI-compatible)
-2. **Poolside** (`poolside/laguna-s-2.1` at `inference.poolside.ai`) — fallback 1 (thinking disabled via `{"thinking": {"type": "disabled"}}`)
-3. **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) — fallback 2 (free-tier ~20 RPM / 200 RPD)
-4. **Deterministic** — no LLM needed; computes a safe fallback recommendation
-
-All providers use `with_structured_output(Recommendation, method="function_calling")` for schema-constrained output. LLM output is validated against known lot IDs to reject hallucinated references.
-
-### Available Models (via Groq)
-
-| Model ID | Context | Best For |
-|---|---|---|
-| `llama-3.3-70b-versatile` | 128K tokens | Structured output, function calling (recommended) |
-| `llama-3.1-8b-instant` | 128K tokens | Ultra-low latency, quick responses |
-| `gemma2-9b-it` | 8K tokens | Lightweight, efficient for simple tasks |
-
-## Correct LTV Formula
+The agent is a six-node pipeline. Each node has one job, and only one of them is allowed to touch an AI model:
 
 ```
-Liquidation Required = Deficit / (1 − Maintenance LTV Limit)
+ingest → ltv_monitor ──→ tax_optimizer → reasoning_agent → human_approval → execution → end
+                     └──→ safe_skip → end        (when Safe + no cash need)
 ```
 
-This accounts for the **shrinking-collateral feedback loop**: selling collateral reduces both collateral value and loan balance simultaneously. The `resulting_ltv_if_executed` field on `Recommendation` captures the post-sale LTV, and the LLM is instructed never to recompute it freehand.
+1. **Ingest** — validates your portfolio JSON and pulls live prices for each holding.
+2. **LTV Monitor** — computes collateral value, current LTV, headroom, and a risk state (`Safe` / `Warning` / `High Risk`). Fires the Slack alert on High Risk.
+3. **Tax Optimizer** — ranks your lots, detects wash sales, classifies short vs. long term, and measures sector concentration. Pure math.
+4. **Reasoning Agent** — *the only LLM node*. Synthesizes everything upstream into a structured recommendation and writes the human-readable rationale.
+5. **Human Approval** — pauses the graph and waits for a yes or no.
+6. **Execution** — records the approved (or rejected) decision to the audit log.
 
-## Wash-Sale Detection
+**A clever shortcut:** if your portfolio is `Safe` and you're not asking for cash, the pipeline *skips* the tax optimizer, the LLM, and the approval step entirely — saving tokens and time when nothing needs doing.
 
-Deterministic same-symbol-within-30-day comparison in `TaxOptimizerNode` (Node 3). Applied to all symbols with 2+ lots. Single-lot symbols still carry a caveat (Rule 9 in `SYSTEM_PROMPT`): wash-sale risk from post-sale repurchase cannot be evaluated from current data alone.
+---
 
-## Test Fixtures
+## 4. The Technical Deep-Dive
 
-Six fixtures in `fixtures/fake_users.json`:
+This section is where we geek out — for developers, reviewers, and anyone who wants to know *why this isn't just a chatbot with a calculator.*
 
-| # | Name | Key Property |
+### 4.1 How we fetch data
+
+Prices come from **yfinance**, with a deliberate ladder of fallbacks so a flaky network never bricks a run:
+
+- **Live prices** — `IngestPortfolioNode` fetches `ticker.fast_info.last_price` per symbol (`nodes.py`). Each symbol is wrapped in its own try/except, so one failing ticker never takes down the rest.
+- **Static fixture fallback** — if yfinance isn't installed, a symbol returns no price, or the API errors, that lot silently keeps its fixture price. Tests and the MCP server run with `use_live_prices=False` for reproducibility.
+- **Web app path** — the dashboard hits `POST /api/portfolio/prices`, which shells out to a Python subprocess via `execFileSync` (no shell, no command injection) after validating every symbol against `/^[A-Z0-9.\-]{1,10}$/`.
+- **Market-stress what-ifs** — the UI's crash sliders feed `getAdjustedSnapshot`, which applies per-symbol or global price shocks so you can answer *"what happens if the market drops 20%?"* before it happens.
+
+### 4.2 How the AI determines risk
+
+Here's the part we're most proud of: **the AI doesn't decide risk. It explains it.**
+
+- Nodes 1–3 compute every number — LTV, headroom, risk state, ranked lots, wash-sale flags, holding periods, sector concentration — as **deterministic Python**. No LLM inference for math, ever.
+- The LLM is confined to a single node (`ReasoningAgentNode`). Its only job is to turn those precomputed numbers into a schema-constrained `Recommendation` and a readable rationale.
+- A **12-rule system prompt** makes the boundary explicit: never recompute LTV or gain/loss, never invent a `lot_id`, reflect precomputed wash-sale flags, prefer short-term losses, and never re-derive post-sale LTV freehand (the shrinking-collateral feedback loop is easy to get wrong — `Liquidation Required = Deficit / (1 − Maintenance LTV Limit)`).
+- Output is **schema-constrained** (`with_structured_output(..., method="function_calling")` for OpenAI-compatible providers, `responseSchema` for Gemini) and then **validated against the actual lot IDs** — a hallucinated reference is discarded and the run falls back to deterministic math.
+- Risk classification itself is plain arithmetic: `Safe` when headroom ≥ 25% of max allowed loan, `Warning` below that, `High Risk` when headroom < 0.
+
+**Resilience that never fails the demo:**
+
+| Tier | Provider | Notes |
 |---|---|---|
-| 1 | Safe Portfolio | `headroom > 0` — no action needed |
-| 2 | Warning Portfolio | Low headroom — monitor |
-| 3 | High Risk (Breached) | `headroom < 0` — liquidate |
-| 4 | Mixed Tax Lots | Multiple symbols — prioritize losses |
-| 5 | Wash Sale Risk | Two XYZ lots 9 days apart — wash-sale flag |
-| 6 | Non-Standard Limit | 35% LTV limit — formula correctness test |
+| 1 | **Gemini** (`gemini-3-flash-preview`) | Primary. `@google/genai` SDK (web) / direct REST with `responseSchema` (Python). |
+| 2 | **Groq** (`llama-3.3-70b-versatile`) | Fast OpenAI-compatible fallback. |
+| 3 | **Poolside** (`poolside/laguna-s-2.1`) | Thinking disabled for structured output. |
+| 4 | **OpenRouter** (`google/gemma-4-26b-a4b-it:free`) | Free-tier fallback. |
+| 5 | **Deterministic** | No LLM needed — the fallback that guarantees an answer. |
 
-## Quick Start
+A **circuit breaker** skips any provider after 3 consecutive failures for 60 seconds, and a **24-hour disk cache** (SHA-256 of the prompt) stops identical queries from burning quota. Providers and models can even be added at runtime from the web UI, persisted server-side in `model-config.json` — no code changes, and API keys never leave the server.
 
-### Web App (TypeScript)
+### 4.3 Deterministic math as the fallback
+
+If every LLM provider is down, quota'd, or returns garbage, the pipeline **still produces a correct answer**. The deterministic fallback in `ReasoningAgentNode` computes the recommendation directly:
+
+- **Sizing** — `Liquidation Required = Deficit / (1 − Maintenance LTV Limit)`, which accounts for the fact that selling collateral shrinks both your collateral *and* your loan at once. Naive sizing (`deficit / limit`) understates what you must sell.
+- **Ordering** — sells lots in rank order (losses before gains, short-term before long-term, biggest loss first) until the proceeds target is met, tracking realized gain/loss per lot.
+- **Post-sale LTV** — computes `resulting_ltv_if_executed` from the pro-forma portfolio so you can see the account *after* the sale, not just before.
+- **The same math runs in TypeScript** — `calculateOptimizer` in `src/utils.ts` is the parity engine behind the web dashboard. The Python and TypeScript implementations are cross-verified to produce identical numbers.
+
+This is why we call the design **"AI governs, math decides."** The LLM adds judgment and explanation; it can never override arithmetic.
+
+### 4.4 Why this design is trustworthy
+
+- **The LLM is forbidden from computing** — a system-prompt rule *and* an anti-hallucination guard enforce it.
+- **Human-in-the-loop** — the graph pauses via `interrupt()` and resumes only on your approval.
+- **Append-only audit trail** — every run records timestamp, account, risk state, headroom, recommendation, approval, result status, and **which provider** produced it. Export it as JSON for compliance or record-keeping.
+- **Cost-aware branching** — safe portfolios skip the LLM and approval entirely.
+- **Domain correctness** — wash-sale detection (IRC §1091, same-symbol-within-30-days), short/long-term classification (≤ 365 days), five cost-basis methods (FIFO/LIFO/HIFO/TLH/Specific), and GICS-like sector-concentration warnings (> 40%).
+
+---
+
+## 5. Quick Start
+
+### Web App (interactive dashboard)
 
 ```bash
 npm install
-# Set keys in .env.local:
-#   GROQ_API_KEY=...          (primary — free tier ~14,400 req/day)
-#   POOLSIDE_API_KEY=...      (optional, fallback 1)
-#   OPENROUTER_API_KEY=...    (optional, fallback 2)
-#   SLACK_WEBHOOK_URL=...     (optional, for High Risk alerts)
+# Set keys in .env.local — see §6
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5173`. Pick a preset account, stress-test it with the market sliders, and click **Audit Portfolio**.
+
+**Admin panel:** sign in at `http://localhost:5173/login` with `ADMIN_EMAIL` + the password behind `ADMIN_PASSWORD_HASH` (default dev creds: `admin@collateral.dev` / `admin123` — change them), then visit `/admin` for a full-system view (users, portfolios, global audit trail, AI usage). In dev the server binds to `127.0.0.1` only; in production it binds `0.0.0.0` (required for Docker/Cloud Run) but enforces `SESSION_SECRET`, Helmet headers, and login rate-limiting.
 
 ### Python Batch Runner
 
@@ -108,22 +124,20 @@ Open `http://localhost:5173`.
 uv venv --python 3.10 .venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-# Copy .env.local keys as above
 python run_fixtures.py
 ```
 
-Runs all 6 fixtures through the graph and prints pass/fail assertions.
+Runs all 6 fixtures through the graph with static prices and prints pass/fail assertions (Python 3.10 required — 3.11+ has known import hangs with LangGraph).
 
 ### MCP Server (Claude Desktop / Claude Code)
 
 ```bash
-python mcp_server.py
-# Or: mcp run mcp_server.py
+python mcp_server.py        # or: mcp run mcp_server.py
 ```
 
 Exposes two tools callable from any Claude interface:
-- `check_ltv(account_json)` — Check LTV ratio and margin call risk
-- `optimize_sale(account_json, cash_need)` — Recommend tax-efficient lot sales
+- `check_ltv(account_json)` — LTV ratio and margin-call risk
+- `optimize_sale(account_json, cash_need)` — tax-efficient lot sales
 
 ### Pre-flight Health Check
 
@@ -131,30 +145,71 @@ Exposes two tools callable from any Claude interface:
 python check_providers.py
 ```
 
-Pings Groq, Poolside, OpenRouter, yfinance, and Slack. Reports which providers/integrations are available before a demo.
+Pings Gemini, Groq, Poolside, OpenRouter, yfinance, and Slack — confirms what's live before a demo.
 
-## Environment Variables
+---
+
+## 6. Configuration
+
+All keys live in `.env.local` (copied from `.env.example`, gitignored). Providers can also be added at runtime from the web UI's **Manage Models** panel.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `GROQ_API_KEY` | Yes (for LLM) | Groq API key (`api.groq.com/openai/v1`) — free tier ~14,400 req/day |
-| `POOLSIDE_API_KEY` | No | Poolside API key (`poolside/laguna-s-2.1`) |
-| `OPENROUTER_API_KEY` | No | OpenRouter API key (free-tier models) |
-| `SLACK_WEBHOOK_URL` | No | Slack incoming webhook URL for High Risk margin call alerts |
+| `GEMINI_API_KEY` | Yes (for LLM) | Primary provider (Google AI Studio) |
+| `GEMINI_MODEL` | No | Default `gemini-3-flash-preview` |
+| `GROQ_API_KEY` | No | Fallback 1 (free tier ~14,400 req/day) |
+| `POOLSIDE_API_KEY` | No | Fallback 2 |
+| `OPENROUTER_API_KEY` | No | Fallback 3 (free-tier models) |
+| `SLACK_WEBHOOK_URL` | No | High Risk margin-call alerts |
+| `AUDIT_STORAGE` | No | Audit backend — `sqlite` (default, dev/tests) or `firestore` (production) |
+| `ADMIN_EMAIL` | No | Admin login email (`/login`, coexists with Google OAuth) |
+| `ADMIN_PASSWORD_HASH` | No | bcrypt hash of the admin password — generate with `npm run hash:admin <password>` |
+| `SESSION_SECRET` | Yes (prod) | Session-cookie signing secret; the server refuses to boot in production without it |
 
-All keys go in `.env.local` (loaded by both Python and Node entry points).
+---
 
-## Key Files
+## 7. Repository Map
 
 | File | Purpose |
 |---|---|
-| `nodes.py` | Pydantic models (`Lot`, `Account`, `LotProposal`, `Recommendation`), `CostBasisMethod` enum, `CircuitBreaker` class, `AuditLogger` class, 8 node classes (`SafeSkipNode` included), `SYSTEM_PROMPT` (12 rules), `AgentState` (includes `cash_need`, `holding_period_days`, `sector_concentration`, `concentration_warning`, `_provider_used`) |
-| `agent.py` | LangGraph `StateGraph` builder with conditional edges (`_route_after_ltv`), configurable checkpointer (memory/postgres/sqlite), fallback `CompiledGraph` with `_next_node` graph walker + resume logic |
-| `run_fixtures.py` | Test runner — builds graph once, iterates 6 fixtures with 2s delay, asserts correctness |
-| `server.ts` | Express backend — Groq + Poolside + OpenRouter fallback chain, chat + analyze + audit + live-prices endpoints, `/api/health` (uses `execFileSync` for security) |
-| `mcp_server.py` | FastMCP v3 server — exposes `check_ltv` and `optimize_sale` as MCP tools for Claude Desktop / Claude Code (safe-skip bypass for `optimize_sale`) |
-| `src/utils.ts` | TypeScript reference implementation of LTV/wash-sale math, sector concentration, short/long-term sort, holding period classification |
-| `src/types.ts` | TypeScript interfaces — `ProposedLot` includes `is_short_term`/`days_held`, `ProposalOutput` includes sector concentration fields |
-| `check_providers.py` | Pre-flight health check — pings all 3 providers + yfinance + Slack |
-| `fixtures/fake_users.json` | 6 synthetic test accounts |
-| `requirements.txt` | Python deps including `langchain-openai`, `yfinance>=1.5.0`, `diskcache`, `fastmcp>=3.0.0,<4.0.0` (requires Python 3.10+) |
+| `nodes.py` | Pydantic models, 8 node classes, LTV/tax/wash-sale math, circuit breaker, audit logger, 12-rule `SYSTEM_PROMPT`, LLM chain + deterministic fallback |
+| `agent.py` | LangGraph `StateGraph` builder with conditional `SafeSkip` branching and configurable checkpointer |
+| `server.ts` | Express backend — provider fallback chain, model management, live prices, analyze/chat/audit endpoints |
+| `src/utils.ts` | TypeScript parity engine — the same deterministic math for the web UI |
+| `src/audit-store.ts` | Audit trail backends — local SQLite (dev/tests) or Firestore (production, via `AUDIT_STORAGE=firestore`) |
+| `mcp_server.py` | FastMCP server exposing `check_ltv` / `optimize_sale` |
+| `fixtures/fake_users.json` | 6 synthetic accounts used by `run_fixtures.py` |
+
+---
+
+## 8. Try It — Fixtures
+
+Six synthetic accounts in `fixtures/fake_users.json` cover the full risk spectrum:
+
+| # | Fixture | Key property |
+|---|---|---|
+| 1 | Safe Portfolio | `headroom > 0` — short-circuits via `SafeSkipNode` |
+| 2 | Warning Portfolio | Thin headroom — monitor only |
+| 3 | High Risk (Breached) | Negative headroom — liquidate, Slack alert fires |
+| 4 | Mixed Tax Lots | Loss lot ranked before gain lot |
+| 5 | Wash Sale Risk | Two XYZ lots 9 days apart — wash-sale flag |
+| 6 | Non-Standard Limit | 35% LTV limit — formula correctness |
+
+---
+
+## 9. Honest Caveats
+
+- **No live trading.** Execution is a simulated dry-run logged to the audit trail. Real broker integration is future work.
+- **Not financial advice.** The agent says so itself, on every recommendation — it's a monitoring and planning tool, not an advisor.
+- **Market data availability.** Live prices come from yfinance and are subject to its availability; the system degrades gracefully to fixture prices.
+- **Wash-sale limits.** Detection covers same-symbol lots within 30 days; risk from a *post-sale repurchase* of a single lot can't be evaluated from current data alone.
+
+---
+
+## 10. Further Reading
+
+- [`Details/Design.md`](Details/Design.md) — full architecture spec, formulas, and edge cases
+- [`Details/QUICKSTART.md`](Details/QUICKSTART.md) — setup and troubleshooting deep-dive
+- [`Details/live.md`](Details/live.md) — deploy & go live (self-hosted Docker Compose default, Google OAuth, Oracle free tier, optional Cloud Run + Firestore)
+- [`Details/CHANGELOG.md`](Details/CHANGELOG.md) — version history
+- [`Details/tier.md`](Details/tier.md) — Build with Gemini XPRIZE readiness map

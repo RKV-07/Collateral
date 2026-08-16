@@ -1,40 +1,54 @@
 import React, { useState } from "react";
 import { HoldingLot, ProposedLot } from "../types";
-import { Trash2, Plus, Calendar, Coins, ShieldAlert, Edit2, Check, X, RefreshCw } from "lucide-react";
+import { type HoldingInput } from "../api";
+import { Trash2, Plus, Calendar, Coins, Edit2, Check, X, RefreshCw, Loader2 } from "lucide-react";
 
 interface HoldingsTableProps {
   holdings: HoldingLot[];
   proposedLots: ProposedLot[];
-  onUpdateHoldings: (newHoldings: HoldingLot[]) => void;
+  onAddHolding: (data: HoldingInput) => Promise<void>;
+  onUpdateLot: (holdingId: string, lotId: string, patch: Partial<HoldingInput>) => Promise<void>;
+  onDeleteLot: (holdingId: string, lotId: string) => Promise<void>;
   onRefreshPrices?: () => void;
   isRefreshingPrices?: boolean;
+  isSaving?: boolean;
 }
 
-export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings, onRefreshPrices, isRefreshingPrices }: HoldingsTableProps) {
+export default function HoldingsTable({
+  holdings,
+  proposedLots,
+  onAddHolding,
+  onUpdateLot,
+  onDeleteLot,
+  onRefreshPrices,
+  isRefreshingPrices,
+  isSaving,
+}: HoldingsTableProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
-  // Form states for new/editing lots
   const [symbol, setSymbol] = useState("");
   const [quantity, setQuantity] = useState("");
   const [costBasis, setCostBasis] = useState("");
-  const [acquiredDate, setAcquiredDate] = useState("2026-07-10");
-  const [currentPrice, setCurrentPrice] = useState("");
+  const [acquiredDate, setAcquiredDate] = useState(() => new Date().toISOString().slice(0, 10));
 
-  const handleAdd = (e: React.FormEvent) => {
+  const resetForm = () => {
+    setSymbol("");
+    setQuantity("");
+    setCostBasis("");
+    setAcquiredDate(new Date().toISOString().slice(0, 10));
+  };
+
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!symbol || !quantity || !costBasis || !currentPrice) return;
-
-    const newLot: HoldingLot = {
-      id: "lot_" + Math.random().toString(36).substr(2, 9),
+    if (!symbol.trim() || !quantity || !costBasis) return;
+    await onAddHolding({
       symbol: symbol.toUpperCase(),
       quantity: parseFloat(quantity),
-      cost_basis: parseFloat(costBasis),
-      acquired_date: acquiredDate,
-      current_price: parseFloat(currentPrice),
-    };
-
-    onUpdateHoldings([...holdings, newLot]);
+      costBasis: parseFloat(costBasis),
+      acquiredAt: acquiredDate,
+    });
     setIsAdding(false);
     resetForm();
   };
@@ -45,75 +59,64 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
     setQuantity(lot.quantity.toString());
     setCostBasis(lot.cost_basis.toString());
     setAcquiredDate(lot.acquired_date);
-    setCurrentPrice(lot.current_price.toString());
   };
 
-  const handleEditSave = (id: string) => {
-    const updated = holdings.map((lot) => {
-      if (lot.id === id) {
-        return {
-          ...lot,
-          symbol: symbol.toUpperCase(),
-          quantity: parseFloat(quantity) || lot.quantity,
-          cost_basis: parseFloat(costBasis) || lot.cost_basis,
-          acquired_date: acquiredDate || lot.acquired_date,
-          current_price: parseFloat(currentPrice) || lot.current_price,
-        };
-      }
-      return lot;
+  const handleEditSave = async (lot: HoldingLot) => {
+    if (!lot.holdingId) return;
+    await onUpdateLot(lot.holdingId, lot.id, {
+      symbol: symbol.toUpperCase(),
+      quantity: parseFloat(quantity),
+      costBasis: parseFloat(costBasis),
+      acquiredAt: acquiredDate,
     });
-    onUpdateHoldings(updated);
     setEditingId(null);
     resetForm();
   };
 
-  const handleDelete = (id: string) => {
-    onUpdateHoldings(holdings.filter((h) => h.id !== id));
+  const handleDelete = async (lot: HoldingLot) => {
+    if (!lot.holdingId) return;
+    setPendingDeleteId(lot.id);
+    try {
+      await onDeleteLot(lot.holdingId, lot.id);
+    } finally {
+      setPendingDeleteId(null);
+    }
   };
 
-  const resetForm = () => {
-    setSymbol("");
-    setQuantity("");
-    setCostBasis("");
-    setAcquiredDate("2026-07-10");
-    setCurrentPrice("");
-  };
-
-  // Helper to check if a lot is being proposed for sale and get proposed quantity/proceeds
-  const getProposalDetails = (lotId: string) => {
-    return proposedLots.find((p) => p.lot_id === lotId);
-  };
+  const getProposalDetails = (lotId: string) => proposedLots.find((p) => p.lot_id === lotId);
 
   return (
-    <div id="holdings-container" className="bg-[#111113] border border-white/10 rounded-2xl p-6 shadow-xl">
-      <div className="flex justify-between items-center mb-6">
+    <div id="holdings-container" className="bg-platter border border-line rounded-2xl p-6 shadow-xl">
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
         <div>
           <h3 className="font-sans font-medium text-base text-white">Portfolio Asset Lots</h3>
-          <p className="text-xs text-white/40 font-mono mt-1">Detailed asset tracking sorted by purchase date & tax lots</p>
+          <p className="text-xs text-white/40 font-mono mt-1">Your persisted holdings — live prices fetched on demand</p>
         </div>
-        <button
-          id="btn-add-lot"
-          onClick={() => setIsAdding(!isAdding)}
-          className="flex items-center gap-2 px-3 py-1.5 bg-white text-black rounded-lg hover:bg-white/90 text-xs font-semibold tracking-tight transition cursor-pointer"
-        >
-          {isAdding ? <X size={14} /> : <Plus size={14} />}
-          {isAdding ? "Cancel" : "Add Tax Lot"}
-        </button>
-        {onRefreshPrices && (
+        <div className="flex items-center gap-2">
+          {onRefreshPrices && (
+            <button
+              id="btn-refresh-prices"
+              onClick={onRefreshPrices}
+              disabled={isRefreshingPrices}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-line text-white/70 hover:text-white rounded-lg text-xs font-medium transition cursor-pointer disabled:opacity-40"
+            >
+              <RefreshCw size={13} className={isRefreshingPrices ? "animate-spin" : ""} />
+              {isRefreshingPrices ? "Refreshing..." : "Refresh Live Prices"}
+            </button>
+          )}
           <button
-            id="btn-refresh-prices"
-            onClick={onRefreshPrices}
-            disabled={isRefreshingPrices}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white rounded-lg text-xs font-medium transition cursor-pointer disabled:opacity-40"
+            id="btn-add-lot"
+            onClick={() => setIsAdding(!isAdding)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-white text-black rounded-lg hover:bg-white/90 text-xs font-semibold tracking-tight transition cursor-pointer"
           >
-            <RefreshCw size={13} className={isRefreshingPrices ? "animate-spin" : ""} />
-            {isRefreshingPrices ? "Refreshing..." : "Refresh Live Prices"}
+            {isAdding ? <X size={14} /> : <Plus size={14} />}
+            {isAdding ? "Cancel" : "Add Tax Lot"}
           </button>
-        )}
+        </div>
       </div>
 
       {isAdding && (
-        <form onSubmit={handleAdd} className="bg-[#161618] border border-white/10 rounded-xl p-4 mb-6 grid grid-cols-2 md:grid-cols-5 gap-3">
+        <form onSubmit={handleAdd} className="bg-platter border border-line rounded-xl p-4 mb-6 grid grid-cols-2 md:grid-cols-5 gap-3">
           <div>
             <label className="block text-[10px] font-semibold text-white/40 uppercase tracking-wider mb-1.5 font-mono">Symbol</label>
             <input
@@ -121,7 +124,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
               placeholder="e.g. AAPL"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value)}
-              className="w-full text-xs bg-[#111113] text-white border border-white/10 rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
+              className="w-full text-xs bg-platter text-white border border-line rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
               required
             />
           </div>
@@ -133,7 +136,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
               placeholder="10"
               value={quantity}
               onChange={(e) => setQuantity(e.target.value)}
-              className="w-full text-xs bg-[#111113] text-white border border-white/10 rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
+              className="w-full text-xs bg-platter text-white border border-line rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
               required
             />
           </div>
@@ -145,7 +148,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
               placeholder="200.00"
               value={costBasis}
               onChange={(e) => setCostBasis(e.target.value)}
-              className="w-full text-xs bg-[#111113] text-white border border-white/10 rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
+              className="w-full text-xs bg-platter text-white border border-line rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
               required
             />
           </div>
@@ -155,28 +158,18 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
               type="date"
               value={acquiredDate}
               onChange={(e) => setAcquiredDate(e.target.value)}
-              className="w-full text-xs bg-[#111113] text-white border border-white/10 rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono text-white/80"
+              className="w-full text-xs bg-platter text-white border border-line rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono text-white/80"
               required
             />
           </div>
-          <div className="flex items-end gap-2">
-            <div className="flex-1">
-              <label className="block text-[10px] font-semibold text-white/40 uppercase tracking-wider mb-1.5 font-mono">Current Price ($)</label>
-              <input
-                type="number"
-                step="any"
-                placeholder="180.00"
-                value={currentPrice}
-                onChange={(e) => setCurrentPrice(e.target.value)}
-                className="w-full text-xs bg-[#111113] text-white border border-white/10 rounded-lg p-2 focus:outline-none focus:border-white/30 font-mono"
-                required
-              />
-            </div>
+          <div className="flex items-end">
             <button
               type="submit"
-              className="p-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition h-[38px] flex items-center justify-center cursor-pointer"
+              disabled={isSaving}
+              className="w-full p-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg transition h-[38px] flex items-center justify-center gap-1.5 cursor-pointer text-xs font-semibold"
             >
-              <Check size={16} />
+              {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+              {isSaving ? "Saving" : "Add"}
             </button>
           </div>
         </form>
@@ -185,7 +178,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
       <div className="overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
-            <tr className="border-b border-white/10 text-left text-[10px] uppercase text-white/40 font-mono tracking-wider">
+            <tr className="border-b border-line text-left text-[10px] uppercase text-white/40 font-mono tracking-wider">
               <th className="pb-3 pl-2">Asset / ID</th>
               <th className="pb-3 text-right">Quantity</th>
               <th className="pb-3 text-right">Cost Basis</th>
@@ -219,12 +212,12 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                         type="text"
                         value={symbol}
                         onChange={(e) => setSymbol(e.target.value)}
-                        className="w-16 bg-[#161618] text-white border border-white/10 rounded text-xs px-2 py-1 font-mono"
+                        className="w-16 bg-platter text-white border border-line rounded text-xs px-2 py-1 font-mono"
                       />
                     ) : (
                       <div>
                         <span className="font-medium text-white text-sm tracking-tight">{lot.symbol}</span>
-                        <span className="block text-[10px] text-white/30 font-mono mt-0.5">{lot.id}</span>
+                        <span className="block text-[10px] text-white/30 font-mono mt-0.5">{lot.id.slice(0, 12)}</span>
                       </div>
                     )}
                   </td>
@@ -235,10 +228,12 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                         step="any"
                         value={quantity}
                         onChange={(e) => setQuantity(e.target.value)}
-                        className="w-16 bg-[#161618] text-white border border-white/10 rounded text-xs px-2 py-1 text-right font-mono"
+                        className="w-16 bg-platter text-white border border-line rounded text-xs px-2 py-1 text-right font-mono"
                       />
                     ) : (
-                      <span className="text-xs text-white/80 font-mono font-medium">{lot.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
+                      <span className="text-xs text-white/80 font-mono font-medium">
+                        {lot.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      </span>
                     )}
                   </td>
                   <td className="py-4 text-right">
@@ -248,24 +243,14 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                         step="any"
                         value={costBasis}
                         onChange={(e) => setCostBasis(e.target.value)}
-                        className="w-16 bg-[#161618] text-white border border-white/10 rounded text-xs px-2 py-1 text-right font-mono"
+                        className="w-16 bg-platter text-white border border-line rounded text-xs px-2 py-1 text-right font-mono"
                       />
                     ) : (
                       <span className="text-xs text-white/60 font-mono">${lot.cost_basis.toFixed(2)}</span>
                     )}
                   </td>
                   <td className="py-4 text-right">
-                    {isEditing ? (
-                      <input
-                        type="number"
-                        step="any"
-                        value={currentPrice}
-                        onChange={(e) => setCurrentPrice(e.target.value)}
-                        className="w-16 bg-[#161618] text-white border border-white/10 rounded text-xs px-2 py-1 text-right font-mono"
-                      />
-                    ) : (
-                      <span className="text-xs text-white/60 font-mono">${lot.current_price.toFixed(2)}</span>
-                    )}
+                    <span className="text-xs text-white/60 font-mono">${lot.current_price.toFixed(2)}</span>
                   </td>
                   <td className="py-4 text-right">
                     <span className="text-xs font-semibold text-white font-mono">
@@ -284,7 +269,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                         type="date"
                         value={acquiredDate}
                         onChange={(e) => setAcquiredDate(e.target.value)}
-                        className="w-28 bg-[#161618] text-white border border-white/10 rounded text-xs px-2 py-1 font-mono text-white/80"
+                        className="w-28 bg-platter text-white border border-line rounded text-xs px-2 py-1 font-mono text-white/80"
                       />
                     ) : (
                       <span className="text-xs text-white/40 font-mono">{lot.acquired_date}</span>
@@ -297,7 +282,9 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                           PROPOSED TO SELL
                         </span>
                         <span className="text-[10px] text-amber-400/70 font-mono mt-1">
-                          {proposal.quantity === lot.quantity ? "Entire lot" : `${proposal.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`}
+                          {proposal.quantity === lot.quantity
+                            ? "Entire lot"
+                            : `${proposal.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`}
                         </span>
                       </div>
                     ) : (
@@ -308,8 +295,9 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                     {isEditing ? (
                       <div className="flex gap-1 justify-end">
                         <button
-                          onClick={() => handleEditSave(lot.id)}
-                          className="p-1 bg-emerald-950/40 text-emerald-400 rounded border border-emerald-500/20 hover:bg-emerald-900/40 transition cursor-pointer"
+                          onClick={() => handleEditSave(lot)}
+                          disabled={isSaving}
+                          className="p-1 bg-emerald-950/40 text-emerald-400 rounded border border-emerald-500/20 hover:bg-emerald-900/40 transition cursor-pointer disabled:opacity-40"
                         >
                           <Check size={14} />
                         </button>
@@ -329,10 +317,11 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
                           <Edit2 size={13} />
                         </button>
                         <button
-                          onClick={() => handleDelete(lot.id)}
-                          className="p-1 text-white/40 hover:text-rose-400 rounded hover:bg-rose-500/5 transition cursor-pointer"
+                          onClick={() => handleDelete(lot)}
+                          disabled={pendingDeleteId === lot.id}
+                          className="p-1 text-white/40 hover:text-rose-400 rounded hover:bg-rose-500/5 transition cursor-pointer disabled:opacity-40"
                         >
-                          <Trash2 size={13} />
+                          {pendingDeleteId === lot.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
                         </button>
                       </div>
                     )}
@@ -344,7 +333,7 @@ export default function HoldingsTable({ holdings, proposedLots, onUpdateHoldings
         </table>
         {holdings.length === 0 && (
           <div className="text-center py-8 text-white/30 text-xs font-mono">
-            No holdings found. Click 'Add Tax Lot' to populate assets.
+            No holdings yet. Click &apos;Add Tax Lot&apos; to enter your first position.
           </div>
         )}
       </div>

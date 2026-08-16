@@ -1,0 +1,84 @@
+// Collateral — single-source Prisma schema (SQLite).
+//
+// DATABASE_URL is resolved by the app at boot (`src/db.ts` defaults it to
+// `file:<cwd>/data/collateral.db`), and by the Prisma CLI from the process env
+// or a `.env` file. Relative values are resolved by Prisma against the schema
+// directory, so `file:../data/collateral.db` lands at <repo>/data/collateral.db.
+// An absolute path is always safe (that is what the app / Docker use).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String    @id @default(cuid())
+  googleId   String    @unique
+  email      String    @unique
+  name       String?
+  role       String    @default("USER")
+  createdAt  DateTime  @default(now())
+  portfolios Portfolio[]
+  sessions   Session[]
+  audits     AuditTrail[]
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model Portfolio {
+  id                  String    @id @default(cuid())
+  userId              String
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cash                Float     @default(0)
+  loanBalance         Float     @default(0)
+  maintenanceLtvLimit Float     @default(0.5)
+  holdings            Holding[]
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+}
+
+model Holding {
+  id          String   @id @default(cuid())
+  portfolioId String
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  symbol      String
+  lots        Lot[]
+}
+
+model Lot {
+  id         String   @id @default(cuid())
+  holdingId  String
+  holding    Holding  @relation(fields: [holdingId], references: [id], onDelete: Cascade)
+  quantity   Float
+  costBasis  Float
+  acquiredAt DateTime
+}
+
+model AuditTrail {
+  id                Int     @id @default(autoincrement())
+  userId            String?
+  user              User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  timestamp         String
+  accountId         String?
+  riskState         String
+  currentLtv        Float
+  headroom          Float
+  recommendedAction String
+  proposedLotsCount Int
+  approved          Boolean
+  status            String
+  provider          String
+
+  @@index([userId])
+  @@index([timestamp])
+}

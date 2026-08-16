@@ -11,7 +11,7 @@ interface OptimizationProposalProps {
   provider?: string;
 }
 
-export default function OptimizationProposal({ proposal, aiRationale, onApprove, isLoading, selectedModel = "gemini-3-flash-preview-free", provider = "deterministic" }: OptimizationProposalProps) {
+export default function OptimizationProposal({ proposal, aiRationale, onApprove, isLoading, selectedModel = "gemini-3-flash-preview", provider = "deterministic" }: OptimizationProposalProps) {
   const [showJson, setShowJson] = useState(false);
   const [isApprovedSuccessfully, setIsApprovedSuccessfully] = useState(false);
 
@@ -41,8 +41,8 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
   const isBreached = proposal.headroom_dollars < 0;
 
   return (
-    <div id="optimizer-proposal-container" className="bg-[#111113] border border-white/10 rounded-2xl p-6 flex flex-col gap-6 shadow-xl">
-      <div className="flex justify-between items-start border-b border-white/10 pb-4">
+    <div id="optimizer-proposal-container" className="bg-platter border border-line rounded-2xl p-6 flex flex-col gap-6 shadow-xl">
+      <div className="flex justify-between items-start border-b border-line pb-4">
         <div>
           <h3 className="font-sans font-medium text-base text-white">Optimization Action Plan</h3>
           <p className="text-xs text-white/40 font-mono mt-1">Tax-minimized asset liquidation proposals</p>
@@ -60,7 +60,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
 
       {/* LTV & Headroom KPI Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="border border-white/5 rounded-xl p-4 bg-[#161618]/70">
+        <div className="border border-white/5 rounded-xl p-4 bg-platter/70">
           <span className="text-[9px] font-bold text-white/30 uppercase font-mono tracking-widest block mb-1.5">Current LTV Ratio</span>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-light font-mono text-white">{(proposal.current_ltv * 100).toFixed(2)}%</span>
@@ -74,7 +74,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
           </div>
         </div>
 
-        <div className="border border-white/5 rounded-xl p-4 bg-[#161618]/70">
+        <div className="border border-white/5 rounded-xl p-4 bg-platter/70">
           <span className="text-[9px] font-bold text-white/30 uppercase font-mono tracking-widest block mb-1.5">Borrowing Headroom</span>
           <span className={`text-2xl font-mono block ${isBreached ? "text-rose-400 animate-pulse font-semibold" : "text-white font-light"}`}>
             ${proposal.headroom_dollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -84,7 +84,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
           </span>
         </div>
 
-        <div className="border border-white/5 rounded-xl p-4 bg-[#161618]/70">
+        <div className="border border-white/5 rounded-xl p-4 bg-platter/70">
           <span className="text-[9px] font-bold text-white/30 uppercase font-mono tracking-widest block mb-1.5">Resulting LTV (Pro-Forma)</span>
           <span className="text-2xl font-light font-mono text-white block">
             {(proposal.resulting_ltv_if_executed * 100).toFixed(2)}%
@@ -107,7 +107,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
                 className={`p-4 border rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-3 transition-all ${
                   trade.wash_sale_caution 
                     ? "border-amber-500/20 bg-amber-500/5 text-amber-300" 
-                    : "border-white/5 bg-[#161618] hover:border-white/10 text-white"
+                    : "border-white/5 bg-platter hover:border-line text-white"
                 }`}
               >
                 <div>
@@ -139,17 +139,17 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
             ))}
           </div>
         ) : (
-          <div className="text-center py-8 border border-dashed border-white/10 rounded-xl text-white/30 text-xs font-mono">
+          <div className="text-center py-8 border border-dashed border-line rounded-xl text-white/30 text-xs font-mono">
             No trades are currently required to maintain margin compliance or liquidity.
           </div>
         )}
       </div>
 
       {/* AI Assistant Rationale Panel */}
-      <div id="advisor-explanation" className="bg-[#161618] border border-white/5 rounded-xl p-5">
+      <div id="advisor-explanation" className="bg-platter border border-white/5 rounded-xl p-5">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <span className="p-1.5 bg-white/5 text-white/80 rounded border border-white/10">
+            <span className="p-1.5 bg-white/5 text-white/80 rounded border border-line">
               <UserCheck size={14} />
             </span>
             <h4 className="font-sans font-medium text-sm text-white">Agent Strategy & Rationale</h4>
@@ -174,19 +174,23 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
               provider === 'deterministic' ? 'bg-gray-500/10 text-gray-400 border border-gray-500/20' :
               provider === 'groq' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
               provider === 'openrouter' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' :
+              provider === 'poolside' ? 'bg-pink-500/10 text-pink-400 border border-pink-500/20' :
+              provider === 'gemini' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
               'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
             }`}>
               {provider === 'deterministic' ? 'Computed deterministically' :
+               provider === 'gemini' ? `Explained by Gemini (${selectedModel})` :
                provider === 'groq' ? `Explained by ${selectedModel}` :
                provider === 'openrouter' ? 'Explained by OpenRouter (fallback)' :
-               'Explained by Poolside (fallback)'}
+               provider === 'poolside' ? 'Explained by Poolside (fallback)' :
+               `Explained by ${provider}`}
             </span>
           </div>
         )}
       </div>
 
       {/* Human Approval Step Guardrails */}
-      <div className="border-t border-white/10 pt-5 flex flex-col gap-4">
+      <div className="border-t border-line pt-5 flex flex-col gap-4">
         <div className="flex items-start gap-3 bg-amber-500/5 border border-amber-500/10 rounded-xl p-4">
           <AlertCircle className="text-amber-500 shrink-0 mt-0.5" size={16} />
           <div>
@@ -219,7 +223,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
       </div>
 
       {/* Collapsible strict JSON display */}
-      <div className="border-t border-white/10 pt-4">
+      <div className="border-t border-line pt-4">
         <button
           onClick={() => setShowJson(!showJson)}
           className="flex items-center justify-between w-full text-xs text-white/30 font-mono hover:text-white transition cursor-pointer"
@@ -231,7 +235,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
           {showJson ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
         {showJson && (
-          <div className="mt-3 bg-[#0A0A0B] text-[#E0E0E0]/80 rounded-lg p-4 font-mono text-[10px] overflow-x-auto border border-white/5">
+          <div className="mt-3 bg-surface text-[#E0E0E0]/80 rounded-lg p-4 font-mono text-[10px] overflow-x-auto border border-white/5">
             <pre>{JSON.stringify({
               risk_state: proposal.risk_state,
               current_ltv: proposal.current_ltv,
@@ -246,7 +250,7 @@ export default function OptimizationProposal({ proposal, aiRationale, onApprove,
       </div>
 
       {/* Export Audit Trail */}
-      <div className="border-t border-white/10 pt-4">
+      <div className="border-t border-line pt-4">
         <button
           onClick={() => {
             const auditData = {

@@ -8,4 +8,12 @@ __pycache__/
 *.log
 .env*
 !.env.example
+.llm_cache/
+model-config.json
 PROJECT_DUMP.txt
+collateral_audit.db
+checkpoints.db
+*.db-journal
+
+# Prisma SQLite database (web app persistence)
+data/

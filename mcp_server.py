@@ -32,7 +32,7 @@ except ImportError:
     print("Then re-run: python mcp_server.py")
     sys.exit(1)
 
-app = FastMCP("collateral-optimizer")
+app = FastMCP("collateral")
 
 # Build node instances once at module level — reuse across tool calls
 # notify=False: read-only MCP queries should not fire Slack alerts

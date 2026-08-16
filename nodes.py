@@ -63,6 +63,34 @@ class Recommendation(BaseModel):
     resulting_ltv_if_executed: Optional[float] = None
     rationale: str
 
+
+# Gemini responseSchema — OpenAPI 3.0 subset accepted by the Gemini API.
+# Mirrors Recommendation so the model returns schema-constrained JSON.
+GEMINI_RECOMMENDATION_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "risk_state": {"type": "STRING"},
+        "recommended_action": {"type": "STRING"},
+        "proposed_lots": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "lot_id": {"type": "STRING"},
+                    "quantity": {"type": "NUMBER"},
+                    "realized_gain_loss": {"type": "NUMBER"},
+                    "wash_sale_caution": {"type": "BOOLEAN"},
+                    "is_long_term": {"type": "BOOLEAN"},
+                },
+                "required": ["lot_id", "quantity", "realized_gain_loss", "wash_sale_caution", "is_long_term"],
+            },
+        },
+        "resulting_ltv_if_executed": {"type": "NUMBER"},
+        "rationale": {"type": "STRING"},
+    },
+    "required": ["risk_state", "recommended_action", "proposed_lots", "rationale"],
+}
+
 # Shared State Definition
 class AgentState(TypedDict, total=False):
     account: Union[Account, Dict[str, Any]]  # set by node 1 (validated Account model)
@@ -599,6 +627,8 @@ class ReasoningAgentNode:
         self.fallback_structured_llm = None
         self.poolside_llm = None
         self.poolside_structured_llm = None
+        self.gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        self.gemini_model = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
         self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
 
         # File-based disk cache (optional — silently disabled if diskcache not installed)
@@ -670,8 +700,57 @@ class ReasoningAgentNode:
             except Exception as e:
                 logger.error("[ReasoningAgentNode] OpenRouter init failed: %s", str(e))
 
-        if not any([self.structured_llm, self.fallback_structured_llm, self.poolside_structured_llm]):
+        if not any([self.structured_llm, self.fallback_structured_llm, self.poolside_structured_llm, self.gemini_key]):
             logger.warning("[ReasoningAgentNode] No LLM providers initialized — will use deterministic fallback only")
+
+    def _call_gemini(self, messages: List[Dict[str, str]]) -> Optional[Recommendation]:
+        """Invoke the Gemini API directly (REST) with schema-constrained output.
+
+        Uses the official gemini API:generateContent endpoint with
+        responseMimeType=application/json and the Recommendation schema.
+        Returns a validated Recommendation or None on failure.
+        """
+        if not self.gemini_key:
+            return None
+
+        system_text = ""
+        contents = []
+        for m in messages:
+            role = m.get("role", "user")
+            text = m.get("content", "")
+            if role == "system":
+                system_text = text
+            else:
+                contents.append({"role": "model" if role == "assistant" else "user", "parts": [{"text": text}]})
+
+        import requests
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent"
+        body = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": system_text}]} if system_text else None,
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json",
+                "responseSchema": GEMINI_RECOMMENDATION_SCHEMA,
+            },
+        }
+        resp = requests.post(
+            url,
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.gemini_key},
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Gemini {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if not text:
+            return None
+        return Recommendation.model_validate_json(text)
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         risk_state = state.get("risk_state", "Safe")
@@ -721,18 +800,19 @@ class ReasoningAgentNode:
                 except Exception:
                     pass  # corrupted cache entry — fall through to LLM
 
-        for label, structured_llm in [
-            ("Groq", self.structured_llm),
-            ("Poolside", self.poolside_structured_llm),
-            ("OpenRouter", self.fallback_structured_llm),
+        for label, callable_llm in [
+            ("Gemini", self._call_gemini if self.gemini_key else None),
+            ("Groq", self.structured_llm.invoke if self.structured_llm else None),
+            ("Poolside", self.poolside_structured_llm.invoke if self.poolside_structured_llm else None),
+            ("OpenRouter", self.fallback_structured_llm.invoke if self.fallback_structured_llm else None),
         ]:
-            if recommendation is not None or structured_llm is None:
+            if recommendation is not None or callable_llm is None:
                 continue
             if not self.circuit_breaker.can_call(label):
                 logger.warning("[ReasoningAgentNode] %s circuit breaker open — skipping", label)
                 continue
             try:
-                result = structured_llm.invoke(messages)
+                result = callable_llm(messages)
                 if not isinstance(result, Recommendation):
                     continue
                 hallucinated = [p for p in result.proposed_lots if str(p.lot_id) not in valid_lot_ids]

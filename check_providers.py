@@ -13,21 +13,31 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 providers = {
+    "Gemini": {
+        "url": "https://generativelanguage.googleapis.com/v1beta",
+        "key_env": "GEMINI_API_KEY",
+        "alt_key_env": "GOOGLE_API_KEY",
+        "model": "gemini-3-flash-preview",
+        "kind": "gemini",
+    },
     "Groq": {
-        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "url": "https://api.groq.com/openai/v1",
         "key_env": "GROQ_API_KEY",
         "model": "llama-3.3-70b-versatile",
+        "kind": "openai",
     },
     "Poolside": {
-        "url": "https://inference.poolside.ai/v1/chat/completions",
+        "url": "https://inference.poolside.ai/v1",
         "key_env": "POOLSIDE_API_KEY",
         "model": "poolside/laguna-s-2.1",
         "extra": {"thinking": {"type": "disabled"}},
+        "kind": "openai",
     },
     "OpenRouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "url": "https://openrouter.ai/api/v1",
         "key_env": "OPENROUTER_API_KEY",
         "model": "google/gemma-4-26b-a4b-it:free",
+        "kind": "openai",
     },
 }
 
@@ -41,29 +51,41 @@ print("  LLM Providers")
 print("  " + "-" * 30)
 any_ok = False
 for name, cfg in providers.items():
-    api_key = os.environ.get(cfg["key_env"], "")
+    api_key = os.environ.get(cfg["key_env"], "") or os.environ.get(cfg.get("alt_key_env", ""), "")
     if not api_key:
         print(f"  {name:12s}  SKIP  (no {cfg['key_env']} set)")
         continue
 
     try:
-        body = {
-            "model": cfg["model"],
-            "messages": [{"role": "user", "content": "Say hi"}],
-            "max_tokens": 10,
-        }
-        if "extra" in cfg:
-            body.update(cfg["extra"])
+        if cfg["kind"] == "gemini":
+            # Gemini Developer API — x-goog-api-key auth, generateContent REST
+            resp = requests.post(
+                f"{cfg['url']}/models/{cfg['model']}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": "Say hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 10},
+                },
+                timeout=15,
+            )
+        else:
+            body = {
+                "model": cfg["model"],
+                "messages": [{"role": "user", "content": "Say hi"}],
+                "max_tokens": 10,
+            }
+            if "extra" in cfg:
+                body.update(cfg["extra"])
 
-        resp = requests.post(
-            cfg["url"],
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=15,
-        )
+            resp = requests.post(
+                f"{cfg['url']}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=15,
+            )
         if resp.status_code == 200:
             print(f"  {name:12s}  OK    (model: {cfg['model']})")
             any_ok = True

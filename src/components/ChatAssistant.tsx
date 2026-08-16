@@ -7,9 +7,10 @@ interface ChatAssistantProps {
   cashNeed: number;
   marketEventDescription: string;
   selectedModel?: string;
+  provider?: string;
 }
 
-export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDescription, selectedModel = "llama-3.3-70b-versatile" }: ChatAssistantProps) {
+export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDescription, selectedModel = "gemini-3-flash-preview", provider = "gemini" }: ChatAssistantProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "model",
@@ -48,6 +49,7 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
           currentSnapshot,
           cashNeed,
           marketEvent: marketEventDescription ? { description: marketEventDescription } : undefined,
+          provider,
           model: selectedModel,
         }),
       });
@@ -79,8 +81,8 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
   };
 
   return (
-    <div id="advisor-chat-container" className="bg-[#111113] border border-white/10 rounded-2xl p-6 flex flex-col h-[520px] shadow-xl">
-      <div className="flex items-center justify-between border-b border-white/10 pb-4 mb-4">
+    <div id="advisor-chat-container" className="bg-platter border border-line rounded-2xl p-6 flex flex-col h-[520px] shadow-xl">
+      <div className="flex items-center justify-between border-b border-line pb-4 mb-4">
         <div className="flex items-center gap-2">
           <span className="p-1.5 bg-white text-black rounded-lg">
             <MessageSquare size={16} />
@@ -90,7 +92,7 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
             <p className="text-xs text-white/40 font-mono mt-0.5">Ask strategy, tax-harvesting, or custom what-if queries</p>
           </div>
         </div>
-        <span className="px-2.5 py-1 bg-white/5 border border-white/10 text-white/60 font-mono text-[10px] rounded-md uppercase tracking-wider flex items-center gap-1.5">
+        <span className="px-2.5 py-1 bg-white/5 border border-line text-white/60 font-mono text-[10px] rounded-md uppercase tracking-wider flex items-center gap-1.5">
           <Sparkles size={11} className="text-amber-400" />
           {selectedModel}
         </span>
@@ -112,8 +114,8 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
             </div>
             <div className={`p-3 rounded-2xl leading-relaxed whitespace-pre-wrap ${
               m.role === "user" 
-                ? "bg-white/5 border border-white/10 text-white/90 rounded-tr-none" 
-                : "bg-[#161618] border border-white/5 text-white/95 rounded-tl-none"
+                ? "bg-white/5 border border-line text-white/90 rounded-tr-none" 
+                : "bg-platter border border-white/5 text-white/95 rounded-tl-none"
             }`}>
               {m.text}
             </div>
@@ -135,7 +137,7 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
             key={idx}
             onClick={() => handleSend(q)}
             disabled={isLoading}
-            className="px-2.5 py-1 bg-[#161618] hover:bg-white/5 border border-white/10 rounded-lg text-[10px] font-medium text-white/60 hover:text-white transition text-left cursor-pointer"
+            className="px-2.5 py-1 bg-platter hover:bg-white/5 border border-line rounded-lg text-[10px] font-medium text-white/60 hover:text-white transition text-left cursor-pointer"
           >
             {q}
           </button>
@@ -156,12 +158,12 @@ export default function ChatAssistant({ currentSnapshot, cashNeed, marketEventDe
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={isLoading}
-          className="flex-1 text-xs bg-[#161618] text-white border border-white/10 rounded-xl px-4 py-2.5 focus:outline-none focus:border-white/30"
+          className="flex-1 text-xs bg-platter text-white border border-line rounded-xl px-4 py-2.5 focus:outline-none focus:border-white/30"
         />
         <button
           type="submit"
           disabled={!input.trim() || isLoading}
-          className="p-2.5 bg-white hover:bg-white/90 disabled:bg-[#161618] disabled:text-white/20 text-black rounded-xl transition cursor-pointer flex items-center justify-center"
+          className="p-2.5 bg-white hover:bg-white/90 disabled:bg-platter disabled:text-white/20 text-black rounded-xl transition cursor-pointer flex items-center justify-center"
         >
           <Send size={14} />
         </button>

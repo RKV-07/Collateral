@@ -5,6 +5,7 @@ export interface HoldingLot {
   cost_basis: number; // per share
   acquired_date: string; // YYYY-MM-DD
   current_price: number; // per share
+  holdingId?: string; // id of the parent Holding row (web app persistence)
 }
 
 export interface AccountSnapshot {
@@ -48,4 +49,38 @@ export interface ProposalOutput {
 export interface ChatMessage {
   role: "user" | "model";
   text: string;
+}
+
+export type ProviderKind = "openai-compatible" | "gemini";
+
+export interface ModelConfig {
+  id: string;
+  name: string;
+  badge?: string;
+  desc?: string;
+  builtin?: boolean;
+}
+
+export interface PublicProvider {
+  id: string;
+  name: string;
+  kind: ProviderKind;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  builtin?: boolean;
+  models: ModelConfig[];
+  hasKey: boolean;
+}
+
+export interface PublicRegistry {
+  defaultProvider: string;
+  defaultModel: string;
+  providers: PublicProvider[];
+  models: {
+    providerId: string;
+    providerName: string;
+    kind: ProviderKind;
+    hasKey: boolean;
+    model: ModelConfig;
+  }[];
 }

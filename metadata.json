@@ -1,5 +1,5 @@
 {
-  "name": "Liquidity & Tax Optimizer",
+  "name": "Collateral — Portfolio Liquidity & Tax Optimizer",
   "description": "Portfolio-collateral monitoring agent that calculates LTV, monitors margin call risk, and proposes lowest-tax-cost lots to sell.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
